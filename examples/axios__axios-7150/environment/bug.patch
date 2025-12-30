@@ -1,0 +1,1275 @@
+diff --git a/README.md b/README.md
+index e9d886e..6f14c29 100644
+--- a/README.md
++++ b/README.md
+@@ -87,7 +87,6 @@
+     - [🔥 Custom fetch](#-custom-fetch)
+       - [🔥 Using with Tauri](#-using-with-tauri)
+       - [🔥 Using with SvelteKit](#-using-with-sveltekit-)
+-  - [🔥 HTTP2](#-http2)
+   - [Semver](#semver)
+   - [Promises](#promises)
+   - [TypeScript](#typescript)
+@@ -1703,34 +1702,6 @@ export async function load({ fetch }) {
+ }
+ ```
+ 
+-## 🔥 HTTP2
+-
+-In version `1.13.0`, experimental `HTTP2` support was added to the `http` adapter. 
+-The `httpVersion` option is now available to select the protocol version used.
+-Additional native options for the internal `session.request()` call can be passed via the `http2Options` config.
+-This config also includes the custom `sessionTimeout` parameter, which defaults to `1000ms`.
+-
+-```js
+-const form = new FormData();
+-
+-    form.append('foo', '123');
+-
+-    const {data, headers, status} = await axios.post('https://httpbin.org/post', form, {
+-      httpVersion: 2,
+-      http2Options: {
+-        // rejectUnauthorized: false,
+-        // sessionTimeout: 1000
+-      },
+-      onUploadProgress(e) {
+-        console.log('upload progress', e);
+-      },
+-      onDownloadProgress(e) {
+-        console.log('download progress', e);
+-      },
+-      responseType: 'arraybuffer'
+-    });
+-```
+-
+ ## Semver
+ 
+ Since Axios has reached a `v.1.0.0` we will fully embrace semver as per the spec [here](https://semver.org/)
+diff --git a/index.d.cts b/index.d.cts
+index e3a06a3..971a644 100644
+--- a/index.d.cts
++++ b/index.d.cts
+@@ -436,10 +436,6 @@ declare namespace axios {
+         ((hostname: string, options: object) => Promise<[address: LookupAddressEntry | LookupAddressEntry[], family?: AddressFamily] | LookupAddress>);
+     withXSRFToken?: boolean | ((config: InternalAxiosRequestConfig) => boolean | undefined);
+     fetchOptions?: Omit<RequestInit, 'body' | 'headers' | 'method' | 'signal'> | Record<string, any>;
+-    httpVersion?: 1 | 2;
+-    http2Options?: Record<string, any> & {
+-      sessionTimeout?: number;
+-    };
+   }
+ 
+   // Alias
+diff --git a/index.d.ts b/index.d.ts
+index a97882a..554140e 100644
+--- a/index.d.ts
++++ b/index.d.ts
+@@ -369,10 +369,6 @@ export interface AxiosRequestConfig<D = any> {
+   withXSRFToken?: boolean | ((config: InternalAxiosRequestConfig) => boolean | undefined);
+   parseReviver?: (this: any, key: string, value: any) => any;
+   fetchOptions?: Omit<RequestInit, 'body' | 'headers' | 'method' | 'signal'> | Record<string, any>;
+-  httpVersion?: 1 | 2;
+-  http2Options?: Record<string, any> & {
+-    sessionTimeout?: number;
+-  };
+ }
+ 
+ // Alias
+diff --git a/lib/adapters/http.js b/lib/adapters/http.js
+index ea69ff2..a3489b2 100755
+--- a/lib/adapters/http.js
++++ b/lib/adapters/http.js
+@@ -1,4 +1,5 @@
+-import { connect, constants } from 'http2';
++'use strict';
++
+ import utils from './../utils.js';
+ import settle from './../core/settle.js';
+ import buildFullPath from '../core/buildFullPath.js';
+@@ -36,13 +37,6 @@ const brotliOptions = {
+   finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
+ }
+ 
+-const {
+-  HTTP2_HEADER_SCHEME,
+-  HTTP2_HEADER_METHOD,
+-  HTTP2_HEADER_PATH,
+-  HTTP2_HEADER_STATUS
+-} = constants;
+-
+ const isBrotliSupported = utils.isFunction(zlib.createBrotliDecompress);
+ 
+ const {http: httpFollow, https: httpsFollow} = followRedirects;
+@@ -62,66 +56,6 @@ const flushOnFinish = (stream, [throttled, flush]) => {
+   return throttled;
+ }
+ 
+-class Http2Sessions {
+-  constructor() {
+-    this.sessions = Object.create(null);
+-  }
+-
+-  getSession(authority, options) {
+-    options = Object.assign({
+-      sessionTimeout: 1000
+-    }, options);
+-
+-    let authoritySessions;
+-
+-    if ((authoritySessions = this.sessions[authority])) {
+-      let len = authoritySessions.length;
+-
+-      for (let i = 0; i < len; i++) {
+-        const [sessionHandle, sessionOptions] = authoritySessions[i];
+-        if (!sessionHandle.destroyed && !sessionHandle.closed && util.isDeepStrictEqual(sessionOptions, options)) {
+-          return sessionHandle;
+-        }
+-      }
+-    }
+-
+-    const session = connect(authority, options);
+-
+-    session.once('close', () => {
+-      let entries = authoritySessions, len = entries.length, i = len;
+-
+-      while (i--) {
+-        if (entries[i][0] === session) {
+-          entries.splice(i, 1);
+-          if (len === 1) {
+-            delete this.sessions[authority];
+-            return;
+-          }
+-        }
+-      }
+-    });
+-
+-    Http2Sessions.setTimeout(session, options.sessionTimeout);
+-
+-    let entries = this.sessions[authority], entry = [
+-      session,
+-      options
+-    ];
+-
+-    entries ? this.sessions[authority].push(entry) : authoritySessions =  this.sessions[authority] = [entry];
+-
+-    return session;
+-  }
+-
+-  static setTimeout(session, timeout = 1000) {
+-    session && session.setTimeout(timeout, () => {
+-      session.close();
+-    });
+-  }
+-}
+-
+-const http2Sessions = new Http2Sessions();
+-
+ 
+ /**
+  * If the proxy or config beforeRedirects functions are defined, call them with the options
+@@ -234,66 +168,16 @@ const resolveFamily = ({address, family}) => {
+ 
+ const buildAddressEntry = (address, family) => resolveFamily(utils.isObject(address) ? address : {address, family});
+ 
+-const http2Transport = {
+-  request(options, cb) {
+-      const authority = options.protocol + '//' + options.hostname + ':' + (options.port || 80);
+-
+-      const {http2Options, headers} = options;
+-
+-      const session = http2Sessions.getSession(authority, http2Options);
+-
+-      const http2Headers = {
+-        [HTTP2_HEADER_SCHEME]: options.protocol.replace(':', ''),
+-        [HTTP2_HEADER_METHOD]: options.method,
+-        [HTTP2_HEADER_PATH]: options.path,
+-      }
+-
+-      utils.forEach(headers, (header, name) => {
+-        name.charAt(0) !== ':' && (http2Headers[name] = header);
+-      });
+-
+-      const req = session.request(http2Headers);
+-
+-      req.once('response', (responseHeaders) => {
+-        const response = req; //duplex
+-
+-        responseHeaders = Object.assign({}, responseHeaders);
+-
+-        const status = responseHeaders[HTTP2_HEADER_STATUS];
+-
+-        delete responseHeaders[HTTP2_HEADER_STATUS];
+-
+-        response.headers = responseHeaders;
+-
+-        response.statusCode = +status;
+-
+-        cb(response);
+-      })
+-
+-      return req;
+-  }
+-}
+-
+ /*eslint consistent-return:0*/
+ export default isHttpAdapterSupported && function httpAdapter(config) {
+   return wrapAsync(async function dispatchHttpRequest(resolve, reject, onDone) {
+-    let {data, lookup, family, httpVersion = 1, http2Options} = config;
++    let {data, lookup, family} = config;
+     const {responseType, responseEncoding} = config;
+     const method = config.method.toUpperCase();
+     let isDone;
+     let rejected = false;
+     let req;
+ 
+-    httpVersion = Number(httpVersion);
+-    if (Number.isNaN(httpVersion)) {
+-      throw TypeError(`Invalid protocol version: '${config.httpVersion}' is not a number`);
+-    }
+-    if (httpVersion !== 1 && httpVersion !== 2) {
+-      throw TypeError(`Unsupported protocol version '${httpVersion}'`);
+-    }
+-
+-    const isHttp2 = httpVersion === 2;
+-
+     if (lookup) {
+       const _lookup = callbackify(lookup, (value) => utils.isArray(value) ? value : [value]);
+       // hotfix to support opt.all option which is required for node 20.x
+@@ -310,17 +194,8 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+       }
+     }
+ 
+-    const abortEmitter = new EventEmitter();
+-
+-    function abort(reason) {
+-      try {
+-        abortEmitter.emit('abort', !reason || reason.type ? new CanceledError(null, config, req) : reason);
+-      } catch(err) {
+-        console.warn('emit error', err);
+-      }
+-    }
+-
+-    abortEmitter.once('abort', reject);
++    // temporary internal emitter until the AxiosRequest class will be implemented
++    const emitter = new EventEmitter();
+ 
+     const onFinished = () => {
+       if (config.cancelToken) {
+@@ -331,40 +206,29 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+         config.signal.removeEventListener('abort', abort);
+       }
+ 
+-      abortEmitter.removeAllListeners();
++      emitter.removeAllListeners();
+     }
+ 
+-    if (config.cancelToken || config.signal) {
+-      config.cancelToken && config.cancelToken.subscribe(abort);
+-      if (config.signal) {
+-        config.signal.aborted ? abort() : config.signal.addEventListener('abort', abort);
+-      }
+-    }
+-
+-    onDone((response, isRejected) => {
++    onDone((value, isRejected) => {
+       isDone = true;
+-
+       if (isRejected) {
+         rejected = true;
+         onFinished();
+-        return;
+-      }
+-
+-      const {data} = response;
+-
+-      if (data instanceof stream.Readable || data instanceof stream.Duplex) {
+-        const offListeners = stream.finished(data, () => {
+-          offListeners();
+-          onFinished();
+-        });
+-      } else {
+-        onFinished();
+       }
+     });
+ 
++    function abort(reason) {
++      emitter.emit('abort', !reason || reason.type ? new CanceledError(null, config, req) : reason);
++    }
+ 
++    emitter.once('abort', reject);
+ 
+-
++    if (config.cancelToken || config.signal) {
++      config.cancelToken && config.cancelToken.subscribe(abort);
++      if (config.signal) {
++        config.signal.aborted ? abort() : config.signal.addEventListener('abort', abort);
++      }
++    }
+ 
+     // Parse url
+     const fullPath = buildFullPath(config.baseURL, config.url, config.allowAbsoluteUrls);
+@@ -572,8 +436,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+       protocol,
+       family,
+       beforeRedirect: dispatchBeforeRedirect,
+-      beforeRedirects: {},
+-      http2Options
++      beforeRedirects: {}
+     };
+ 
+     // cacheable-lookup integration hotfix
+@@ -590,23 +453,18 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+     let transport;
+     const isHttpsRequest = isHttps.test(options.protocol);
+     options.agent = isHttpsRequest ? config.httpsAgent : config.httpAgent;
+-
+-    if (isHttp2) {
+-       transport = http2Transport;
++    if (config.transport) {
++      transport = config.transport;
++    } else if (config.maxRedirects === 0) {
++      transport = isHttpsRequest ? https : http;
+     } else {
+-      if (config.transport) {
+-        transport = config.transport;
+-      } else if (config.maxRedirects === 0) {
+-        transport = isHttpsRequest ? https : http;
+-      } else {
+-        if (config.maxRedirects) {
+-          options.maxRedirects = config.maxRedirects;
+-        }
+-        if (config.beforeRedirect) {
+-          options.beforeRedirects.config = config.beforeRedirect;
+-        }
+-        transport = isHttpsRequest ? httpsFollow : httpFollow;
++      if (config.maxRedirects) {
++        options.maxRedirects = config.maxRedirects;
++      }
++      if (config.beforeRedirect) {
++        options.beforeRedirects.config = config.beforeRedirect;
+       }
++      transport = isHttpsRequest ? httpsFollow : httpFollow;
+     }
+ 
+     if (config.maxBodyLength > -1) {
+@@ -626,7 +484,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+ 
+       const streams = [res];
+ 
+-      const responseLength = utils.toFiniteNumber(res.headers['content-length']);
++      const responseLength = +res.headers['content-length'];
+ 
+       if (onDownloadProgress || maxDownloadRate) {
+         const transformStream = new AxiosTransformStream({
+@@ -689,7 +547,10 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+ 
+       responseStream = streams.length > 1 ? stream.pipeline(streams, utils.noop) : streams[0];
+ 
+-
++      const offListeners = stream.finished(responseStream, () => {
++        offListeners();
++        onFinished();
++      });
+ 
+       const response = {
+         status: res.statusCode,
+@@ -701,7 +562,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+ 
+       if (responseType === 'stream') {
+         response.data = responseStream;
+-        settle(resolve, abort, response);
++        settle(resolve, reject, response);
+       } else {
+         const responseBuffer = [];
+         let totalResponseBytes = 0;
+@@ -715,7 +576,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+             // stream.destroy() emit aborted event before calling reject() on Node.js v16
+             rejected = true;
+             responseStream.destroy();
+-            abort(new AxiosError('maxContentLength size of ' + config.maxContentLength + ' exceeded',
++            reject(new AxiosError('maxContentLength size of ' + config.maxContentLength + ' exceeded',
+               AxiosError.ERR_BAD_RESPONSE, config, lastRequest));
+           }
+         });
+@@ -757,7 +618,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+         });
+       }
+ 
+-      abortEmitter.once('abort', err => {
++      emitter.once('abort', err => {
+         if (!responseStream.destroyed) {
+           responseStream.emit('error', err);
+           responseStream.destroy();
+@@ -765,12 +626,9 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+       });
+     });
+ 
+-    abortEmitter.once('abort', err => {
+-      if (req.close) {
+-        req.close();
+-      } else {
+-        req.destroy(err);
+-      }
++    emitter.once('abort', err => {
++      reject(err);
++      req.destroy(err);
+     });
+ 
+     // Handle errors
+@@ -792,7 +650,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+       const timeout = parseInt(config.timeout, 10);
+ 
+       if (Number.isNaN(timeout)) {
+-        abort(new AxiosError(
++        reject(new AxiosError(
+           'error trying to parse `config.timeout` to int',
+           AxiosError.ERR_BAD_OPTION_VALUE,
+           config,
+@@ -814,12 +672,13 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+         if (config.timeoutErrorMessage) {
+           timeoutErrorMessage = config.timeoutErrorMessage;
+         }
+-        abort(new AxiosError(
++        reject(new AxiosError(
+           timeoutErrorMessage,
+           transitional.clarifyTimeoutError ? AxiosError.ETIMEDOUT : AxiosError.ECONNABORTED,
+           config,
+           req
+         ));
++        abort();
+       });
+     }
+ 
+@@ -846,8 +705,7 @@ export default isHttpAdapterSupported && function httpAdapter(config) {
+ 
+       data.pipe(req);
+     } else {
+-      data && req.write(data);
+-      req.end();
++      req.end(data);
+     }
+   });
+ }
+diff --git a/package-lock.json b/package-lock.json
+index 37b4c75..b90391b 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -66,7 +66,6 @@
+         "rollup-plugin-auto-external": "^2.0.0",
+         "rollup-plugin-bundle-size": "^1.0.3",
+         "rollup-plugin-terser": "^7.0.2",
+-        "selfsigned": "^3.0.1",
+         "sinon": "^4.5.0",
+         "stream-throttle": "^0.1.3",
+         "string-replace-async": "^3.0.2",
+@@ -17910,16 +17909,6 @@
+         }
+       }
+     },
+-    "node_modules/node-forge": {
+-      "version": "1.3.1",
+-      "resolved": "https://registry.npmjs.org/node-forge/-/node-forge-1.3.1.tgz",
+-      "integrity": "sha512-dPEtOeMvF9VMcYV/1Wb8CPoVAXtp6MKMlcbAt4ddqmGqUJ6fQZFXkNZNkNlfevtNkGtaSoXf/vNNNSvgrdXwtA==",
+-      "dev": true,
+-      "license": "(BSD-3-Clause OR GPL-2.0)",
+-      "engines": {
+-        "node": ">= 6.13.0"
+-      }
+-    },
+     "node_modules/node-gyp": {
+       "version": "11.4.2",
+       "resolved": "https://registry.npmjs.org/node-gyp/-/node-gyp-11.4.2.tgz",
+@@ -22327,19 +22316,6 @@
+         "seek-table": "bin/seek-bzip-table"
+       }
+     },
+-    "node_modules/selfsigned": {
+-      "version": "3.0.1",
+-      "resolved": "https://registry.npmjs.org/selfsigned/-/selfsigned-3.0.1.tgz",
+-      "integrity": "sha512-6U6w6kSLrM9Zxo0D7mC7QdGS6ZZytMWBnj/vhF9p+dAHx6CwGezuRcO4VclTbrrI7mg7SD6zNiqXUuBHOVopNQ==",
+-      "dev": true,
+-      "license": "MIT",
+-      "dependencies": {
+-        "node-forge": "^1"
+-      },
+-      "engines": {
+-        "node": ">=10"
+-      }
+-    },
+     "node_modules/semver": {
+       "version": "7.3.8",
+       "resolved": "https://registry.npmjs.org/semver/-/semver-7.3.8.tgz",
+@@ -40812,12 +40788,6 @@
+         "whatwg-url": "^5.0.0"
+       }
+     },
+-    "node-forge": {
+-      "version": "1.3.1",
+-      "resolved": "https://registry.npmjs.org/node-forge/-/node-forge-1.3.1.tgz",
+-      "integrity": "sha512-dPEtOeMvF9VMcYV/1Wb8CPoVAXtp6MKMlcbAt4ddqmGqUJ6fQZFXkNZNkNlfevtNkGtaSoXf/vNNNSvgrdXwtA==",
+-      "dev": true
+-    },
+     "node-gyp": {
+       "version": "11.4.2",
+       "resolved": "https://registry.npmjs.org/node-gyp/-/node-gyp-11.4.2.tgz",
+@@ -44145,15 +44115,6 @@
+         "commander": "^2.8.1"
+       }
+     },
+-    "selfsigned": {
+-      "version": "3.0.1",
+-      "resolved": "https://registry.npmjs.org/selfsigned/-/selfsigned-3.0.1.tgz",
+-      "integrity": "sha512-6U6w6kSLrM9Zxo0D7mC7QdGS6ZZytMWBnj/vhF9p+dAHx6CwGezuRcO4VclTbrrI7mg7SD6zNiqXUuBHOVopNQ==",
+-      "dev": true,
+-      "requires": {
+-        "node-forge": "^1"
+-      }
+-    },
+     "semver": {
+       "version": "7.3.8",
+       "resolved": "https://registry.npmjs.org/semver/-/semver-7.3.8.tgz",
+diff --git a/package.json b/package.json
+index b04de5a..98e0749 100644
+--- a/package.json
++++ b/package.json
+@@ -146,7 +146,6 @@
+     "rollup-plugin-auto-external": "^2.0.0",
+     "rollup-plugin-bundle-size": "^1.0.3",
+     "rollup-plugin-terser": "^7.0.2",
+-    "selfsigned": "^3.0.1",
+     "sinon": "^4.5.0",
+     "stream-throttle": "^0.1.3",
+     "string-replace-async": "^3.0.2",
+diff --git a/test/helpers/server.js b/test/helpers/server.js
+index 698b2b7..1eb1534 100644
+--- a/test/helpers/server.js
++++ b/test/helpers/server.js
+@@ -1,10 +1,8 @@
+ import http from "http";
+-import http2 from "http2";
+ import stream from "stream";
+ import getStream from "get-stream";
+ import {Throttle} from "stream-throttle";
+ import formidable from "formidable";
+-import selfsigned from 'selfsigned';
+ 
+ 
+ export const LOCAL_SERVER_URL = 'http://localhost:4444';
+@@ -13,26 +11,15 @@ export const SERVER_HANDLER_STREAM_ECHO = (req, res) => req.pipe(res);
+ 
+ export const setTimeoutAsync = (ms) => new Promise(resolve=> setTimeout(resolve, ms));
+ 
+-const certificate = selfsigned.generate(null, { keySize: 2048 });
+-
+ export const startHTTPServer = (handlerOrOptions, options) => {
+ 
+-  const {
+-    handler,
+-    useBuffering = false,
+-    rate = undefined,
+-    port = 4444,
+-    keepAlive = 1000,
+-    useHTTP2,
+-    key = certificate.private,
+-    cert = certificate.cert,
+-  } =
++  const {handler, useBuffering = false, rate = undefined, port = 4444, keepAlive = 1000} =
+     Object.assign(typeof handlerOrOptions === 'function' ? {
+       handler: handlerOrOptions
+     } : handlerOrOptions || {}, options);
+ 
+   return new Promise((resolve, reject) => {
+-    const serverHandler = handler || async function (req, res) {
++    const server = http.createServer(handler || async function (req, res) {
+       try {
+         req.headers['content-length'] && res.setHeader('content-length', req.headers['content-length']);
+ 
+@@ -56,36 +43,12 @@ export const startHTTPServer = (handlerOrOptions, options) => {
+       } catch (err){
+         console.warn('HTTP server error:', err);
+       }
+-    }
+-
+-    const server = useHTTP2 ?
+-      http2.createSecureServer({key, cert} , serverHandler) :
+-      http.createServer(serverHandler);
+-
+-    const sessions = new Set();
+-
+-    if(useHTTP2) {
+-      server.on('session', (session) => {
+-        sessions.add(session);
+-
+-        session.once('close', () => {
+-          sessions.delete(session);
+-        });
+-      });
+-
+-      server.closeAllSessions = () => {
+-        for (const session of sessions) {
+-          session.destroy();
+-        }
+-      }
+-    } else {
+-      server.keepAliveTimeout = keepAlive;
+-    }
+ 
+-    server.listen(port, function (err) {
++    }).listen(port, function (err) {
+       err ? reject(err) : resolve(this);
+     });
+ 
++    server.keepAliveTimeout = keepAlive;
+   });
+ }
+ 
+@@ -95,10 +58,6 @@ export const stopHTTPServer = async (server, timeout = 10000) => {
+       server.closeAllConnections();
+     }
+ 
+-    if (typeof server.closeAllSessions === 'function') {
+-      server.closeAllSessions();
+-    }
+-
+     await Promise.race([new Promise(resolve => server.close(resolve)), setTimeoutAsync(timeout)]);
+   }
+ }
+diff --git a/test/unit/adapters/http.js b/test/unit/adapters/http.js
+index 2f63bbf..04a846d 100644
+--- a/test/unit/adapters/http.js
++++ b/test/unit/adapters/http.js
+@@ -10,7 +10,7 @@ import assert from 'assert';
+ import fs from 'fs';
+ import path from 'path';
+ import {lookup} from 'dns';
+-let server, server2, proxy;
++let server, proxy;
+ import AxiosError from '../../../lib/core/AxiosError.js';
+ import FormDataLegacy from 'form-data';
+ import formidable from 'formidable';
+@@ -18,23 +18,11 @@ import express from 'express';
+ import multer from 'multer';
+ import bodyParser from 'body-parser';
+ const isBlobSupported = typeof Blob !== 'undefined';
++import {Throttle} from 'stream-throttle';
+ import devNull from 'dev-null';
+ import {AbortController} from 'abortcontroller-polyfill/dist/cjs-ponyfill.js';
+ import {__setProxy} from "../../../lib/adapters/http.js";
+ import {FormData as FormDataPolyfill, Blob as BlobPolyfill, File as FilePolyfill} from 'formdata-node';
+-import getStream from "get-stream";
+-import {
+-  startHTTPServer,
+-  stopHTTPServer,
+-  LOCAL_SERVER_URL,
+-  SERVER_HANDLER_STREAM_ECHO,
+-  handleFormData,
+-  generateReadable
+-} from '../../helpers/server.js';
+-
+-const LOCAL_SERVER_URL2 = 'https://localhost:5555';
+-const SERVER_PORT = 4444;
+-const SERVER_PORT2 = 5555;
+ 
+ const FormDataSpecCompliant = typeof FormData !== 'undefined' ? FormData : FormDataPolyfill;
+ const BlobSpecCompliant = typeof Blob !== 'undefined' ? Blob : BlobPolyfill;
+@@ -43,6 +31,8 @@ const FileSpecCompliant = typeof File !== 'undefined' ? File : FilePolyfill;
+ const __filename = url.fileURLToPath(import.meta.url);
+ const __dirname = path.dirname(__filename);
+ 
++import getStream from 'get-stream';
++
+ function setTimeoutAsync(ms) {
+   return new Promise(resolve=> setTimeout(resolve, ms));
+ }
+@@ -55,11 +45,11 @@ const deflateRaw = util.promisify(zlib.deflateRaw);
+ const brotliCompress = util.promisify(zlib.brotliCompress);
+ 
+ function toleranceRange(positive, negative) {
+-  const p = 1 + positive / 100;
+-  const n = 1 - negative / 100;
++  const p = (1 + 1 / positive);
++  const n = (1 / negative);
+ 
+   return (actualValue, value) => {
+-    return actualValue > value ? actualValue <= value * p : actualValue >= value * n;
++    return actualValue - value > 0 ? actualValue < value * p : actualValue > value * n;
+   }
+ }
+ 
+@@ -68,12 +58,100 @@ const nodeMajorVersion = nodeVersion[0];
+ 
+ var noop = ()=> {};
+ 
++const LOCAL_SERVER_URL = 'http://localhost:4444';
++
++const SERVER_HANDLER_STREAM_ECHO = (req, res) => req.pipe(res);
++
++function startHTTPServer(handlerOrOptions, options) {
++
++  const {handler, useBuffering = false, rate = undefined, port = 4444, keepAlive = 1000} =
++    Object.assign(typeof handlerOrOptions === 'function' ? {
++      handler: handlerOrOptions
++    } : handlerOrOptions || {}, options);
++
++  return new Promise((resolve, reject) => {
++    const server = http.createServer(handler || async function (req, res) {
++      try {
++        req.headers['content-length'] && res.setHeader('content-length', req.headers['content-length']);
++
++        var dataStream = req;
++
++        if (useBuffering) {
++          dataStream = stream.Readable.from(await getStream(req));
++        }
++
++        var streams = [dataStream];
++
++        if (rate) {
++          streams.push(new Throttle({rate}))
++        }
++
++        streams.push(res);
++
++        stream.pipeline(streams, (err) => {
++          err && console.log('Server warning: ' + err.message)
++        });
++      } catch (err){
++        console.warn('HTTP server error:', err);
++      }
++
++    }).listen(port, function (err) {
++      err ? reject(err) : resolve(this);
++    });
++
++    server.keepAliveTimeout = keepAlive;
++  });
++}
++
++const stopHTTPServer = async (server, timeout = 10000) => {
++  if (server) {
++    if (typeof server.closeAllConnections === 'function') {
++      server.closeAllConnections();
++    }
++
++    await Promise.race([new Promise(resolve => server.close(resolve)), setTimeoutAsync(timeout)]);
++  }
++}
++
++const handleFormData = (req) => {
++  return new Promise((resolve, reject) => {
++    const form = new formidable.IncomingForm();
++
++    form.parse(req, (err, fields, files) => {
++      if (err) {
++        return reject(err);
++      }
++
++      resolve({fields, files});
++    });
++  });
++}
++
++function generateReadableStream(length = 1024 * 1024, chunkSize = 10 * 1024, sleep = 50) {
++  return stream.Readable.from(async function* (){
++    let dataLength = 0;
++
++    while(dataLength < length) {
++      const leftBytes = length - dataLength;
++
++      const chunk = Buffer.alloc(leftBytes > chunkSize? chunkSize : leftBytes);
++
++      dataLength += chunk.length;
++
++      yield chunk;
++
++      if (sleep) {
++        await setTimeoutAsync(sleep);
++      }
++    }
++  }());
++}
++
+ describe('supports http with nodejs', function () {
+   afterEach(async function () {
+-    await Promise.all([stopHTTPServer(server), stopHTTPServer(server2), stopHTTPServer(proxy)]);
++    await Promise.all([stopHTTPServer(server), stopHTTPServer(proxy)]);
+ 
+     server = null;
+-    server2 = null;
+     proxy = null;
+ 
+     delete process.env.http_proxy;
+@@ -880,7 +958,7 @@ describe('supports http with nodejs', function () {
+     it('should destroy the response stream with an error on request stream destroying', async function () {
+       server = await startHTTPServer();
+ 
+-      let stream = generateReadable();
++      let stream = generateReadableStream();
+ 
+       setTimeout(function () {
+         stream.destroy();
+@@ -1997,8 +2075,6 @@ describe('supports http with nodejs', function () {
+   });
+ 
+   describe('Rate limit', function () {
+-    this.timeout(30000);
+-
+     it('should support upload rate limit', async function () {
+       const secs = 10;
+       const configRate = 100_000;
+@@ -2008,8 +2084,8 @@ describe('supports http with nodejs', function () {
+ 
+       const buf = Buffer.alloc(chunkLength).fill('s');
+       const samples = [];
+-      const skip = 4;
+-      const compareValues = toleranceRange(50, 50);
++      const skip = 2;
++      const compareValues = toleranceRange(10, 50);
+ 
+       const {data} = await axios.post(LOCAL_SERVER_URL, buf, {
+         onUploadProgress: ({loaded, total, progress, bytes, rate}) => {
+@@ -2056,8 +2132,8 @@ describe('supports http with nodejs', function () {
+ 
+       const buf = Buffer.alloc(chunkLength).fill('s');
+       const samples = [];
+-      const skip = 4;
+-      const compareValues = toleranceRange(50, 50);
++      const skip = 2;
++      const compareValues = toleranceRange(10, 50);
+ 
+       const {data} = await axios.post(LOCAL_SERVER_URL, buf, {
+         onDownloadProgress: ({loaded, total, progress, bytes, rate}) => {
+@@ -2097,9 +2173,7 @@ describe('supports http with nodejs', function () {
+   });
+ 
+   describe('request aborting', function() {
+-    //this.timeout(5000);
+-
+-    it('should be able to abort the response stream', async () => {
++    it('should be able to abort the response stream', async function () {
+       server = await startHTTPServer({
+         rate: 100_000,
+         useBuffering: true
+@@ -2109,7 +2183,7 @@ describe('supports http with nodejs', function () {
+ 
+       const controller = new AbortController();
+ 
+-      const {data} = await axios.post(LOCAL_SERVER_URL, buf, {
++      var {data} = await axios.post(LOCAL_SERVER_URL, buf, {
+         responseType: 'stream',
+         signal: controller.signal,
+         maxRedirects: 0
+@@ -2125,9 +2199,14 @@ describe('supports http with nodejs', function () {
+         streamError = err;
+       });
+ 
+-      await assert.rejects(() => pipelineAsync([data, devNull()]));
+-
+-      assert.strictEqual(streamError && streamError.code, 'ERR_CANCELED');
++      try {
++        await pipelineAsync(data, devNull());
++        assert.fail('stream was not aborted');
++      } catch(e) {
++        console.log(`pipeline error: ${e}`);
++      } finally {
++        assert.strictEqual(streamError && streamError.code, 'ERR_CANCELED');
++      }
+     });
+   })
+ 
+@@ -2271,395 +2350,4 @@ describe('supports http with nodejs', function () {
+       assert.deepStrictEqual(data, {foo: 'success'});
+     });
+   });
+-
+-  describe('HTTP2', function () {
+-    const LOCAL_SERVER_URL = 'https://127.0.0.1:4444';
+-
+-    const http2Axios = axios.create({
+-      baseURL: LOCAL_SERVER_URL,
+-      httpVersion: 2,
+-      http2Options: {
+-        rejectUnauthorized: false
+-      }
+-    });
+-
+-    it('should merge request http2Options with its instance config', async () => {
+-      const {data} = await http2Axios.get('/', {
+-        http2Options: {
+-          foo : 'test'
+-        },
+-        adapter: async (config) => {
+-          return {
+-            data: config.http2Options
+-          }
+-        }
+-      });
+-
+-      assert.deepStrictEqual(data, {
+-        rejectUnauthorized: false,
+-        foo : 'test'
+-      });
+-    });
+-
+-    it('should support http2 transport', async () => {
+-      server = await startHTTPServer((req, res) => {
+-        res.end('OK');
+-      }, {
+-        useHTTP2: true
+-      });
+-
+-      const {data} = await http2Axios.get(LOCAL_SERVER_URL);
+-
+-      assert.deepStrictEqual(data, 'OK');
+-
+-    });
+-
+-    it(`should support request payload`, async () => {
+-      server = await startHTTPServer(null, {
+-        useHTTP2: true
+-      });
+-
+-      const payload = 'DATA';
+-
+-      const {data} = await http2Axios.post(LOCAL_SERVER_URL, payload);
+-
+-      assert.deepStrictEqual(data, payload);
+-
+-    });
+-
+-    it(`should support FormData as a payload`, async function () {
+-      if (typeof FormData !== 'function') {
+-        this.skip();
+-      }
+-
+-
+-      server = await startHTTPServer(async (req, res) => {
+-        const {fields, files} = await handleFormData(req);
+-
+-        res.end(JSON.stringify({
+-          fields,
+-          files
+-        }));
+-      }, {
+-        useHTTP2: true
+-      });
+-
+-      const form = new FormData();
+-
+-      form.append('x', 'foo');
+-      form.append('y', 'bar');
+-
+-      const {data} = await http2Axios.post(LOCAL_SERVER_URL, form);
+-
+-      assert.deepStrictEqual(data, {
+-        fields: {
+-          x: 'foo',
+-          y: 'bar'
+-        },
+-        files: {}
+-      });
+-
+-    });
+-
+-    describe("response types", () => {
+-      const originalData = '{"test": "OK"}';
+-
+-      const fixtures = {
+-        'text' : (v) => assert.strictEqual(v, originalData),
+-        'arraybuffer' : (v) => assert.deepStrictEqual(v, Buffer.from(originalData)),
+-        'stream': async (v) => assert.deepStrictEqual(await getStream(v), originalData),
+-        'json': async (v) => assert.deepStrictEqual(v, JSON.parse(originalData))
+-      };
+-
+-      for(let [responseType, assertValue] of Object.entries(fixtures)) {
+-        it(`should support ${responseType} response type`, async () => {
+-          server = await startHTTPServer((req, res) => {
+-            res.end(originalData);
+-          }, {
+-            useHTTP2: true
+-          });
+-
+-          const {data} = await http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType
+-          });
+-
+-          await assertValue(data);
+-        });
+-      }
+-    });
+-
+-
+-
+-    it('should support request timeout', async () => {
+-      let isAborted= false;
+-
+-      let aborted;
+-      const promise = new Promise(resolve => aborted = resolve);
+-
+-      server = await startHTTPServer((req, res) => {
+-        setTimeout(() => {
+-          res.end('OK');
+-        }, 15000);
+-      }, {
+-        useHTTP2: true
+-      });
+-
+-      server.on('stream', (stream) => {
+-        stream.once('aborted', () => {
+-          isAborted = true;
+-          aborted();
+-        });
+-      });
+-
+-      await assert.rejects(async () => {
+-        await http2Axios.get(LOCAL_SERVER_URL, {
+-          timeout: 500
+-        });
+-      }, /timeout/);
+-
+-      await promise;
+-
+-      assert.ok(isAborted);
+-    });
+-
+-    it('should support request cancellation', async function (){
+-      if (typeof AbortSignal !== 'function') {
+-        this.skip();
+-      }
+-
+-      let isAborted= false;
+-
+-      let aborted;
+-      const promise = new Promise(resolve => aborted = resolve);
+-
+-      server = await startHTTPServer((req, res) => {
+-        setTimeout(() => {
+-          res.end('OK');
+-        }, 15000);
+-      }, {
+-        useHTTP2: true
+-      });
+-
+-      server.on('stream', (stream) => {
+-        stream.once('aborted', () => {
+-          isAborted = true;
+-          aborted();
+-        });
+-      });
+-
+-      await assert.rejects(async () => {
+-        await http2Axios.get(LOCAL_SERVER_URL, {
+-          signal: AbortSignal.timeout(500)
+-        });
+-      }, /CanceledError: canceled/);
+-
+-      await promise;
+-
+-      assert.ok(isAborted);
+-    });
+-
+-    it('should support stream response cancellation', async () => {
+-      let isAborted= false;
+-      var source = axios.CancelToken.source();
+-
+-      let aborted;
+-      const promise = new Promise(resolve => aborted = resolve);
+-
+-      server = await startHTTPServer((req, res) => {
+-        generateReadable(10000, 100, 100).pipe(res);
+-      }, {
+-        useHTTP2: true
+-      });
+-
+-      server.on('stream', (stream) => {
+-        stream.once('aborted', () => {
+-          isAborted = true;
+-          aborted();
+-        });
+-      });
+-
+-      const {data} = await http2Axios.get(LOCAL_SERVER_URL, {
+-        cancelToken: source.token,
+-        responseType: 'stream'
+-      });
+-
+-      setTimeout(() => source.cancel());
+-
+-      await assert.rejects(
+-        () => pipelineAsync([data, devNull()]),
+-        /CanceledError: canceled/
+-      )
+-
+-      await promise;
+-
+-      assert.ok(isAborted);
+-    });
+-
+-    describe("session", () => {
+-      it("should reuse session for the target authority", async() => {
+-        server = await startHTTPServer((req, res) => {
+-          setTimeout(() => res.end('OK'), 1000);
+-        }, {
+-          useHTTP2: true
+-        });
+-
+-        const [response1, response2] = await Promise.all([
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream'
+-          }),
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream'
+-          })
+-        ]);
+-
+-        assert.strictEqual(response1.data.session, response2.data.session);
+-
+-        assert.deepStrictEqual(
+-          await Promise.all([
+-            getStream(response1.data),
+-            getStream(response2.data)
+-          ]),
+-          ['OK', 'OK']
+-        );
+-      });
+-
+-      it("should use different sessions for different authorities", async() => {
+-        server = await startHTTPServer((req, res) => {
+-          setTimeout(() => res.end('OK'), 1000);
+-        }, {
+-          useHTTP2: true
+-        });
+-
+-        server2 = await startHTTPServer((req, res) => {
+-          setTimeout(() => res.end('OK'), 1000);
+-        }, {
+-          useHTTP2: true,
+-          port: SERVER_PORT2
+-        });
+-
+-        const [response1, response2] = await Promise.all([
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream'
+-          }),
+-          http2Axios.get(LOCAL_SERVER_URL2, {
+-            responseType: 'stream'
+-          })
+-        ]);
+-
+-        assert.notStrictEqual(response1.data.session, response2.data.session);
+-
+-        assert.deepStrictEqual(
+-          await Promise.all([
+-            getStream(response1.data),
+-            getStream(response2.data)
+-          ]),
+-          ['OK', 'OK']
+-        );
+-      });
+-
+-      it("should use different sessions for requests with different http2Options set", async() => {
+-        server = await startHTTPServer((req, res) => {
+-          setTimeout(() => res.end('OK'), 1000);
+-        }, {
+-          useHTTP2: true
+-        });
+-
+-        const [response1, response2] = await Promise.all([
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream',
+-            http2Options: {
+-
+-            }
+-          }),
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream',
+-            http2Options: {
+-              foo: 'test'
+-            }
+-          })
+-        ]);
+-
+-        assert.notStrictEqual(response1.data.session, response2.data.session);
+-
+-        assert.deepStrictEqual(
+-          await Promise.all([
+-            getStream(response1.data),
+-            getStream(response2.data)
+-          ]),
+-          ['OK', 'OK']
+-        );
+-      });
+-
+-      it("should use the same session for request with the same resolved http2Options set", async() => {
+-        server = await startHTTPServer((req, res) => {
+-          setTimeout(() => res.end('OK'), 1000);
+-        }, {
+-          useHTTP2: true
+-        });
+-
+-        const responses = await Promise.all([
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream'
+-          }),
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream',
+-            http2Options: undefined
+-          }),
+-          http2Axios.get(LOCAL_SERVER_URL, {
+-            responseType: 'stream',
+-            http2Options: {
+-
+-            }
+-          })
+-        ]);
+-
+-
+-
+-        assert.strictEqual(responses[1].data.session, responses[0].data.session);
+-        assert.strictEqual(responses[2].data.session, responses[0].data.session);
+-
+-
+-        assert.deepStrictEqual(
+-          await Promise.all(responses.map(({data}) => getStream(data))),
+-          ['OK', 'OK', 'OK']
+-        );
+-      });
+-
+-      it("should use different sessions after previous session timeout", async() => {
+-        server = await startHTTPServer((req, res) => {
+-          setTimeout(() => res.end('OK'), 100);
+-        }, {
+-          useHTTP2: true
+-        });
+-
+-        const response1 = await http2Axios.get(LOCAL_SERVER_URL, {
+-          responseType: 'stream',
+-          http2Options: {
+-            sessionTimeout: 1000
+-          }
+-        });
+-
+-        await setTimeoutAsync(5000);
+-
+-        const response2 = await http2Axios.get(LOCAL_SERVER_URL, {
+-          responseType: 'stream',
+-          http2Options: {
+-            sessionTimeout: 1000
+-          }
+-        });
+-
+-        assert.notStrictEqual(response1.data.session, response2.data.session);
+-
+-        assert.deepStrictEqual(
+-          await Promise.all([
+-            getStream(response1.data),
+-            getStream(response2.data)
+-          ]),
+-          ['OK', 'OK']
+-        );
+-      });
+-    });
+-  });
+ });
+-
+-

@@ -1,0 +1,270 @@
+diff --git a/packages/zod/src/v4/classic/schemas.ts b/packages/zod/src/v4/classic/schemas.ts
+index e3a50f3d..6130b1f5 100644
+--- a/packages/zod/src/v4/classic/schemas.ts
++++ b/packages/zod/src/v4/classic/schemas.ts
+@@ -146,14 +146,16 @@ export const ZodType: core.$constructor<ZodType> = /*@__PURE__*/ core.$construct
+   // base methods
+   inst.check = (...checks) => {
+     return inst.clone(
+-      util.mergeDefs(def, {
++      {
++        ...def,
+         checks: [
+           ...(def.checks ?? []),
+           ...checks.map((ch) =>
+             typeof ch === "function" ? { _zod: { check: ch, def: { check: "custom" }, onattach: [] } } : ch
+           ),
+         ],
+-      })
++      }
++      // { parent: true }
+     );
+   };
+   inst.clone = (def, params) => core.clone(inst, def, params);
+@@ -1194,10 +1196,7 @@ export const ZodObject: core.$constructor<ZodObject> = /*@__PURE__*/ core.$const
+   core.$ZodObjectJIT.init(inst, def);
+   ZodType.init(inst, def);
+ 
+-  util.defineLazy(inst, "shape", () => {
+-    return def.shape;
+-  });
+-
++  util.defineLazy(inst, "shape", () => def.shape);
+   inst.keyof = () => _enum(Object.keys(inst._zod.def.shape)) as any;
+   inst.catchall = (catchall) => inst.clone({ ...inst._zod.def, catchall: catchall as any as core.$ZodType }) as any;
+   inst.passthrough = () => inst.clone({ ...inst._zod.def, catchall: unknown() });
+@@ -1224,7 +1223,10 @@ export function object<T extends core.$ZodLooseShape = Partial<Record<never, cor
+ ): ZodObject<util.Writeable<T>, core.$strip> {
+   const def: core.$ZodObjectDef = {
+     type: "object",
+-    shape: shape!,
++    get shape() {
++      util.assignProp(this, "shape", shape ? util.objectClone(shape) : {});
++      return this.shape;
++    },
+     ...util.normalizeParams(params),
+   };
+   return new ZodObject(def) as any;
+@@ -1238,7 +1240,10 @@ export function strictObject<T extends core.$ZodLooseShape>(
+ ): ZodObject<T, core.$strict> {
+   return new ZodObject({
+     type: "object",
+-    shape,
++    get shape() {
++      util.assignProp(this, "shape", util.objectClone(shape));
++      return this.shape;
++    },
+     catchall: never(),
+     ...util.normalizeParams(params),
+   }) as any;
+@@ -1252,7 +1257,10 @@ export function looseObject<T extends core.$ZodLooseShape>(
+ ): ZodObject<T, core.$loose> {
+   return new ZodObject({
+     type: "object",
+-    shape,
++    get shape() {
++      util.assignProp(this, "shape", util.objectClone(shape));
++      return this.shape;
++    },
+     catchall: unknown(),
+     ...util.normalizeParams(params),
+   }) as any;
+diff --git a/packages/zod/src/v4/classic/tests/recursive-types.test.ts b/packages/zod/src/v4/classic/tests/recursive-types.test.ts
+index 5ec7e48d..8f982164 100644
+--- a/packages/zod/src/v4/classic/tests/recursive-types.test.ts
++++ b/packages/zod/src/v4/classic/tests/recursive-types.test.ts
+@@ -537,46 +537,3 @@ export type RecursiveA = z.ZodUnion<
+     }>,
+   ]
+ >;
+-
+-test("recursive type with `id` meta", () => {
+-  const AType = z.object({
+-    type: z.literal("a"),
+-    name: z.string(),
+-  });
+-
+-  const BType = z.object({
+-    type: z.literal("b"),
+-    name: z.string(),
+-  });
+-
+-  const CType = z.object({
+-    type: z.literal("c"),
+-    name: z.string(),
+-  });
+-
+-  const Schema = z.object({
+-    type: z.literal("special").meta({ description: "Type" }),
+-    config: z.object({
+-      title: z.string().meta({ description: "Title" }),
+-      get elements() {
+-        return z.array(z.discriminatedUnion("type", [AType, BType, CType])).meta({
+-          id: "SpecialElements",
+-          title: "SpecialElements",
+-          description: "Array of elements",
+-        });
+-      },
+-    }),
+-  });
+-
+-  Schema.parse({
+-    type: "special",
+-    config: {
+-      title: "Special",
+-      elements: [
+-        { type: "a", name: "John" },
+-        { type: "b", name: "Jane" },
+-        { type: "c", name: "Jim" },
+-      ],
+-    },
+-  });
+-});
+diff --git a/packages/zod/src/v4/core/schemas.ts b/packages/zod/src/v4/core/schemas.ts
+index 55cbfc50..98aa588b 100644
+--- a/packages/zod/src/v4/core/schemas.ts
++++ b/packages/zod/src/v4/core/schemas.ts
+@@ -1739,7 +1739,7 @@ export interface $ZodObjectDef<Shape extends $ZodShape = $ZodShape> extends $Zod
+ 
+ export interface $ZodObjectInternals<
+   /** @ts-ignore Cast variance */
+-  out Shape extends $ZodShape = $ZodShape,
++  out Shape extends Readonly<$ZodShape> = Readonly<$ZodShape>,
+   out Config extends $ZodObjectConfig = $ZodObjectConfig,
+ > extends _$ZodTypeInternals {
+   def: $ZodObjectDef<Shape>;
+@@ -1825,21 +1825,6 @@ function handleCatchall(
+ export const $ZodObject: core.$constructor<$ZodObject> = /*@__PURE__*/ core.$constructor("$ZodObject", (inst, def) => {
+   // requires cast because technically $ZodObject doesn't extend
+   $ZodType.init(inst, def);
+-  // const sh = def.shape;
+-  const desc = Object.getOwnPropertyDescriptor(def, "shape");
+-  if (!desc!.get) {
+-    const sh = def.shape;
+-    Object.defineProperty(def, "shape", {
+-      get: () => {
+-        const newSh = { ...sh };
+-        Object.defineProperty(def, "shape", {
+-          value: newSh,
+-        });
+-
+-        return newSh;
+-      },
+-    });
+-  }
+ 
+   const _normalized = util.cached(() => normalizeDef(def));
+ 
+@@ -1868,6 +1853,7 @@ export const $ZodObject: core.$constructor<$ZodObject> = /*@__PURE__*/ core.$con
+       payload.issues.push({
+         expected: "object",
+         code: "invalid_type",
++
+         input,
+         inst,
+       });
+diff --git a/packages/zod/src/v4/mini/schemas.ts b/packages/zod/src/v4/mini/schemas.ts
+index b5f065bf..8dcd73aa 100644
+--- a/packages/zod/src/v4/mini/schemas.ts
++++ b/packages/zod/src/v4/mini/schemas.ts
+@@ -769,7 +769,10 @@ export function object<T extends core.$ZodLooseShape = Record<never, SomeType>>(
+ ): ZodMiniObject<T, core.$strip> {
+   const def: core.$ZodObjectDef = {
+     type: "object",
+-    shape: shape!,
++    get shape() {
++      util.assignProp(this, "shape", { ...shape });
++      return this.shape;
++    },
+     ...util.normalizeParams(params),
+   };
+   return new ZodMiniObject(def) as any;
+@@ -782,7 +785,11 @@ export function strictObject<T extends core.$ZodLooseShape>(
+ ): ZodMiniObject<T, core.$strict> {
+   return new ZodMiniObject({
+     type: "object",
+-    shape,
++    // shape: shape as core.$ZodLooseShape,
++    get shape() {
++      util.assignProp(this, "shape", { ...shape });
++      return this.shape;
++    },
+     catchall: never(),
+     ...util.normalizeParams(params),
+   }) as any;
+@@ -795,7 +802,14 @@ export function looseObject<T extends core.$ZodLooseShape>(
+ ): ZodMiniObject<T, core.$loose> {
+   return new ZodMiniObject({
+     type: "object",
+-    shape,
++    // shape: shape as core.$ZodLooseShape,
++    get shape() {
++      util.assignProp(this, "shape", { ...shape });
++      return this.shape;
++    },
++    // get optional() {
++    //   return util.optionalKeys(shape);
++    // },
+     catchall: unknown(),
+     ...util.normalizeParams(params),
+   }) as any;
+diff --git a/play.ts b/play.ts
+index 25ffd69f..17d4f70e 100644
+--- a/play.ts
++++ b/play.ts
+@@ -1,52 +1,5 @@
+-import * as z from "zod";
++const test = () => 1;
+ 
+-z;
++test.something = () => 2;
+ 
+-// export const LinesSchema = <T extends z.ZodType<unknown, any>>(schema: T) =>
+-//   z
+-//     .string()
+-//     .transform((input) => input.trim().split("\n"))
+-//     .pipe(z.array(schema));
+-
+-const AType = z.object({
+-  type: z.literal("a"),
+-  name: z.string(),
+-});
+-
+-const BType = z.object({
+-  type: z.literal("b"),
+-  name: z.string(),
+-});
+-
+-const CType = z.object({
+-  type: z.literal("c"),
+-  name: z.string(),
+-});
+-
+-const Schema = z.object({
+-  type: z.literal("special").meta({ description: "Type" }),
+-  config: z.object({
+-    title: z.string().meta({ description: "Title" }),
+-    get elements() {
+-      return z.array(z.discriminatedUnion("type", [AType, BType, CType])).meta({
+-        id: "SpecialElements",
+-        title: "SpecialElements",
+-        description: "Array of elements",
+-      });
+-    },
+-  }),
+-});
+-
+-console.log(
+-  Schema.parse({
+-    type: "special",
+-    config: {
+-      title: "Special",
+-      elements: [
+-        { type: "a", name: "John" },
+-        { type: "b", name: "Jane" },
+-        { type: "c", name: "Jim" },
+-      ],
+-    },
+-  })
+-);
++test.something;

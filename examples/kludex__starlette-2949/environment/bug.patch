@@ -1,0 +1,177 @@
+diff --git a/pyproject.toml b/pyproject.toml
+index 56c9900..e86f49d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -27,7 +27,7 @@ classifiers = [
+ ]
+ dependencies = [
+     "anyio>=3.6.2,<5",
+-    "typing_extensions>=4.10.0; python_version < '3.13'",
++    "typing_extensions>=3.10.0; python_version < '3.10'",
+ ]
+ 
+ [project.optional-dependencies]
+diff --git a/starlette/_exception_handler.py b/starlette/_exception_handler.py
+index 40761b6..bcb96c9 100644
+--- a/starlette/_exception_handler.py
++++ b/starlette/_exception_handler.py
+@@ -58,7 +58,7 @@ def wrap_app_handling_exceptions(app: ASGIApp, conn: Request | WebSocket) -> ASG
+             if is_async_callable(handler):
+                 response = await handler(conn, exc)
+             else:
+-                response = await run_in_threadpool(handler, conn, exc)
++                response = await run_in_threadpool(handler, conn, exc)  # type: ignore
+             if response is not None:
+                 await response(scope, receive, sender)
+ 
+diff --git a/starlette/_utils.py b/starlette/_utils.py
+index 5ac985d..a35ca82 100644
+--- a/starlette/_utils.py
++++ b/starlette/_utils.py
+@@ -9,10 +9,10 @@ from typing import Any, Callable, Generic, Protocol, TypeVar, overload
+ 
+ from starlette.types import Scope
+ 
+-if sys.version_info >= (3, 13):  # pragma: no cover
+-    from typing import TypeIs
++if sys.version_info >= (3, 10):  # pragma: no cover
++    from typing import TypeGuard
+ else:  # pragma: no cover
+-    from typing_extensions import TypeIs
++    from typing_extensions import TypeGuard
+ 
+ has_exceptiongroups = True
+ if sys.version_info < (3, 11):  # pragma: no cover
+@@ -26,11 +26,11 @@ AwaitableCallable = Callable[..., Awaitable[T]]
+ 
+ 
+ @overload
+-def is_async_callable(obj: AwaitableCallable[T]) -> TypeIs[AwaitableCallable[T]]: ...
++def is_async_callable(obj: AwaitableCallable[T]) -> TypeGuard[AwaitableCallable[T]]: ...
+ 
+ 
+ @overload
+-def is_async_callable(obj: Any) -> TypeIs[AwaitableCallable[Any]]: ...
++def is_async_callable(obj: Any) -> TypeGuard[AwaitableCallable[Any]]: ...
+ 
+ 
+ def is_async_callable(obj: Any) -> Any:
+diff --git a/starlette/applications.py b/starlette/applications.py
+index 62c0eb1..32f6e56 100644
+--- a/starlette/applications.py
++++ b/starlette/applications.py
+@@ -80,7 +80,7 @@ class Starlette:
+     def build_middleware_stack(self) -> ASGIApp:
+         debug = self.debug
+         error_handler = None
+-        exception_handlers: dict[Any, ExceptionHandler] = {}
++        exception_handlers: dict[Any, Callable[[Request, Exception], Response]] = {}
+ 
+         for key, value in self.exception_handlers.items():
+             if key in (500, Exception):
+diff --git a/starlette/middleware/errors.py b/starlette/middleware/errors.py
+index bbc1072..60b96a5 100644
+--- a/starlette/middleware/errors.py
++++ b/starlette/middleware/errors.py
+@@ -4,12 +4,13 @@ import html
+ import inspect
+ import sys
+ import traceback
++from typing import Any, Callable
+ 
+ from starlette._utils import is_async_callable
+ from starlette.concurrency import run_in_threadpool
+ from starlette.requests import Request
+ from starlette.responses import HTMLResponse, PlainTextResponse, Response
+-from starlette.types import ASGIApp, ExceptionHandler, Message, Receive, Scope, Send
++from starlette.types import ASGIApp, Message, Receive, Scope, Send
+ 
+ STYLES = """
+ p {
+@@ -139,7 +140,7 @@ class ServerErrorMiddleware:
+     def __init__(
+         self,
+         app: ASGIApp,
+-        handler: ExceptionHandler | None = None,
++        handler: Callable[[Request, Exception], Any] | None = None,
+         debug: bool = False,
+     ) -> None:
+         self.app = app
+diff --git a/starlette/middleware/exceptions.py b/starlette/middleware/exceptions.py
+index 6c98558..864c223 100644
+--- a/starlette/middleware/exceptions.py
++++ b/starlette/middleware/exceptions.py
+@@ -1,7 +1,7 @@
+ from __future__ import annotations
+ 
+ from collections.abc import Mapping
+-from typing import Any
++from typing import Any, Callable
+ 
+ from starlette._exception_handler import (
+     ExceptionHandlers,
+@@ -11,7 +11,7 @@ from starlette._exception_handler import (
+ from starlette.exceptions import HTTPException, WebSocketException
+ from starlette.requests import Request
+ from starlette.responses import PlainTextResponse, Response
+-from starlette.types import ASGIApp, ExceptionHandler, Receive, Scope, Send
++from starlette.types import ASGIApp, Receive, Scope, Send
+ from starlette.websockets import WebSocket
+ 
+ 
+@@ -19,7 +19,7 @@ class ExceptionMiddleware:
+     def __init__(
+         self,
+         app: ASGIApp,
+-        handlers: Mapping[Any, ExceptionHandler] | None = None,
++        handlers: Mapping[Any, Callable[[Request, Exception], Response]] | None = None,
+         debug: bool = False,
+     ) -> None:
+         self.app = app
+@@ -36,7 +36,7 @@ class ExceptionMiddleware:
+     def add_exception_handler(
+         self,
+         exc_class_or_status_code: int | type[Exception],
+-        handler: ExceptionHandler,
++        handler: Callable[[Request, Exception], Response],
+     ) -> None:
+         if isinstance(exc_class_or_status_code, int):
+             self._status_handlers[exc_class_or_status_code] = handler
+diff --git a/starlette/routing.py b/starlette/routing.py
+index 96c2df9..db7921e 100644
+--- a/starlette/routing.py
++++ b/starlette/routing.py
+@@ -65,7 +65,7 @@ def request_response(
+     and returns an ASGI application.
+     """
+     f: Callable[[Request], Awaitable[Response]] = (
+-        func if is_async_callable(func) else functools.partial(run_in_threadpool, func)
++        func if is_async_callable(func) else functools.partial(run_in_threadpool, func)  # type:ignore
+     )
+ 
+     async def app(scope: Scope, receive: Receive, send: Send) -> None:
+diff --git a/tests/test_exceptions.py b/tests/test_exceptions.py
+index d554ac0..3b48f81 100644
+--- a/tests/test_exceptions.py
++++ b/tests/test_exceptions.py
+@@ -205,20 +205,3 @@ def test_http_exception_does_not_use_threadpool(client: TestClient, monkeypatch:
+     # This should succeed because http_exception is async and won't use run_in_threadpool
+     response = client.get("/not_acceptable")
+     assert response.status_code == 406
+-
+-
+-def test_handlers_annotations() -> None:
+-    """Check that async exception handlers are accepted by type checkers.
+-
+-    We annotate the handlers' exceptions with plain `Exception` to avoid variance issues
+-    when using other exception types.
+-    """
+-
+-    async def async_catch_all_handler(request: Request, exc: Exception) -> JSONResponse:
+-        raise NotImplementedError
+-
+-    def sync_catch_all_handler(request: Request, exc: Exception) -> JSONResponse:
+-        raise NotImplementedError
+-
+-    ExceptionMiddleware(router, handlers={Exception: sync_catch_all_handler})
+-    ExceptionMiddleware(router, handlers={Exception: async_catch_all_handler})

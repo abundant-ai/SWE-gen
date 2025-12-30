@@ -1,0 +1,432 @@
+diff --git a/.changelog/23085.txt b/.changelog/23085.txt
+deleted file mode 100644
+index 5c603a77cf..0000000000
+--- a/.changelog/23085.txt
++++ /dev/null
+@@ -1,3 +0,0 @@
+-```release-note:improvement
+-connect: added ability to configure Virtual IP range for t-proxy with CIDRs
+-```
+diff --git a/agent/agent.go b/agent/agent.go
+index e4b95ff993..7d4bbcc185 100644
+--- a/agent/agent.go
++++ b/agent/agent.go
+@@ -1564,8 +1564,6 @@ func newConsulConfig(runtimeCfg *config.RuntimeConfig, logger hclog.Logger) (*co
+ 
+ 		cfg.CAConfig = ca
+ 	}
+-	cfg.ConnectVirtualIPCIDRv4 = runtimeCfg.ConnectVirtualIPCIDRv4
+-	cfg.ConnectVirtualIPCIDRv6 = runtimeCfg.ConnectVirtualIPCIDRv6
+ 
+ 	// copy over auto runtimeCfg settings
+ 	cfg.AutoConfigEnabled = runtimeCfg.AutoConfig.Enabled
+diff --git a/agent/config/builder.go b/agent/config/builder.go
+index 38bd757917..63b73e9d64 100644
+--- a/agent/config/builder.go
++++ b/agent/config/builder.go
+@@ -36,7 +36,6 @@ import (
+ 	"github.com/hashicorp/consul/agent/consul"
+ 	"github.com/hashicorp/consul/agent/consul/authmethod/ssoauth"
+ 	consulrate "github.com/hashicorp/consul/agent/consul/rate"
+-	"github.com/hashicorp/consul/agent/consul/state"
+ 	hcpconfig "github.com/hashicorp/consul/agent/hcp/config"
+ 	"github.com/hashicorp/consul/agent/rpc/middleware"
+ 	"github.com/hashicorp/consul/agent/structs"
+@@ -692,17 +691,6 @@ func (b *builder) build() (rt RuntimeConfig, err error) {
+ 	connectEnabled := boolVal(c.Connect.Enabled)
+ 	connectCAProvider := stringVal(c.Connect.CAProvider)
+ 	connectCAConfig := c.Connect.CAConfig
+-	connectVirtualIPCIDRv4 := state.DefaultVirtualIPv4CIDR
+-	if cidr := stringVal(c.Connect.VirtualIPCIDRv4); cidr != "" {
+-		connectVirtualIPCIDRv4 = cidr
+-	}
+-	connectVirtualIPCIDRv6 := state.DefaultVirtualIPv6CIDR
+-	if cidr := stringVal(c.Connect.VirtualIPCIDRv6); cidr != "" {
+-		connectVirtualIPCIDRv6 = cidr
+-	}
+-	if err := state.ValidateVirtualIPCIDRs(connectVirtualIPCIDRv4, connectVirtualIPCIDRv6); err != nil {
+-		return RuntimeConfig{}, err
+-	}
+ 
+ 	// autoEncrypt and autoConfig implicitly turns on connect which is why
+ 	// they need to be above other settings that rely on connect.
+@@ -1011,8 +999,6 @@ func (b *builder) build() (rt RuntimeConfig, err error) {
+ 		ConnectMeshGatewayWANFederationEnabled: connectMeshGatewayWANFederationEnabled,
+ 		ConnectSidecarMinPort:                  sidecarMinPort,
+ 		ConnectSidecarMaxPort:                  sidecarMaxPort,
+-		ConnectVirtualIPCIDRv4:                 connectVirtualIPCIDRv4,
+-		ConnectVirtualIPCIDRv6:                 connectVirtualIPCIDRv6,
+ 		ConnectTestCALeafRootChangeSpread:      b.durationVal("connect.test_ca_leaf_root_change_spread", c.Connect.TestCALeafRootChangeSpread),
+ 		ExposeMinPort:                          exposeMinPort,
+ 		ExposeMaxPort:                          exposeMaxPort,
+diff --git a/agent/config/config.go b/agent/config/config.go
+index c2d9131860..b9179201d4 100644
+--- a/agent/config/config.go
++++ b/agent/config/config.go
+@@ -642,8 +642,6 @@ type Connect struct {
+ 	CAProvider                      *string                `mapstructure:"ca_provider" json:"ca_provider,omitempty"`
+ 	CAConfig                        map[string]interface{} `mapstructure:"ca_config" json:"ca_config,omitempty"`
+ 	MeshGatewayWANFederationEnabled *bool                  `mapstructure:"enable_mesh_gateway_wan_federation" json:"enable_mesh_gateway_wan_federation,omitempty"`
+-	VirtualIPCIDRv4                 *string                `mapstructure:"virtual_ip_cidr_v4" json:"virtual_ip_cidr_v4,omitempty"`
+-	VirtualIPCIDRv6                 *string                `mapstructure:"virtual_ip_cidr_v6" json:"virtual_ip_cidr_v6,omitempty"`
+ 
+ 	// TestCALeafRootChangeSpread controls how long after a CA roots change before new leaf certs will be generated.
+ 	// This is only tuned in tests, generally set to 1ns to make tests deterministic with when to expect updated leaf
+diff --git a/agent/config/runtime.go b/agent/config/runtime.go
+index 97de5bff0f..fb5728af34 100644
+--- a/agent/config/runtime.go
++++ b/agent/config/runtime.go
+@@ -526,12 +526,6 @@ type RuntimeConfig struct {
+ 	// datacenters should exclusively traverse mesh gateways.
+ 	ConnectMeshGatewayWANFederationEnabled bool
+ 
+-	// ConnectVirtualIPCIDRv4 defines the IPv4 CIDR block used for automatic virtual IPs.
+-	ConnectVirtualIPCIDRv4 string
+-
+-	// ConnectVirtualIPCIDRv6 defines the IPv6 CIDR block used for automatic virtual IPs.
+-	ConnectVirtualIPCIDRv6 string
+-
+ 	// ConnectTestCALeafRootChangeSpread is used to control how long the CA leaf
+ 	// cache with spread CSRs over when a root change occurs. For now we don't
+ 	// expose this in public config intentionally but could later with a rename.
+diff --git a/agent/config/runtime_test.go b/agent/config/runtime_test.go
+index 35004cdd58..5354750664 100644
+--- a/agent/config/runtime_test.go
++++ b/agent/config/runtime_test.go
+@@ -6674,8 +6674,6 @@ func TestLoad_FullConfig(t *testing.T) {
+ 			"CSRMaxPerSecond":     float64(100),
+ 			"CSRMaxConcurrent":    float64(2),
+ 		},
+-		ConnectVirtualIPCIDRv4:                 "240.0.0.0/4",
+-		ConnectVirtualIPCIDRv6:                 "2000::/3",
+ 		ConnectMeshGatewayWANFederationEnabled: false,
+ 		Cloud: hcpconfig.CloudConfig{
+ 			ResourceID:   "N43DsscE",
+diff --git a/agent/config/testdata/TestRuntimeConfig_Sanitize.golden b/agent/config/testdata/TestRuntimeConfig_Sanitize.golden
+index b767ec60ef..04006cf36b 100644
+--- a/agent/config/testdata/TestRuntimeConfig_Sanitize.golden
++++ b/agent/config/testdata/TestRuntimeConfig_Sanitize.golden
+@@ -149,8 +149,6 @@
+     "ConnectSidecarMaxPort": 0,
+     "ConnectSidecarMinPort": 0,
+     "ConnectTestCALeafRootChangeSpread": "0s",
+-    "ConnectVirtualIPCIDRv4": "",
+-    "ConnectVirtualIPCIDRv6": "",
+     "ConsulCoordinateUpdateBatchSize": 0,
+     "ConsulCoordinateUpdateMaxBatches": 0,
+     "ConsulCoordinateUpdatePeriod": "15s",
+diff --git a/agent/consul/config.go b/agent/consul/config.go
+index e50d664c02..574d169668 100644
+--- a/agent/consul/config.go
++++ b/agent/consul/config.go
+@@ -415,12 +415,6 @@ type Config struct {
+ 	// datacenters should exclusively traverse mesh gateways.
+ 	ConnectMeshGatewayWANFederationEnabled bool
+ 
+-	// ConnectVirtualIPCIDRv4 defines the IPv4 CIDR block used for auto-allocated virtual IPs.
+-	ConnectVirtualIPCIDRv4 string
+-
+-	// ConnectVirtualIPCIDRv6 defines the IPv6 CIDR block used for auto-allocated virtual IPs.
+-	ConnectVirtualIPCIDRv6 string
+-
+ 	// DefaultIntentionPolicy is used to define a default intention action for all
+ 	// sources and destinations. Possible values are "allow", "deny", or "" (blank).
+ 	// For compatibility, falls back to ACLResolverSettings.ACLDefaultPolicy (which
+diff --git a/agent/consul/server.go b/agent/consul/server.go
+index 283c080d5e..8442af4310 100644
+--- a/agent/consul/server.go
++++ b/agent/consul/server.go
+@@ -484,9 +484,6 @@ func NewServer(config *Config, flat Deps, externalGRPCServer *grpc.Server,
+ 	if err := config.CheckEnumStrings(); err != nil {
+ 		return nil, err
+ 	}
+-	if err := state.SetVirtualIPConfig(config.ConnectVirtualIPCIDRv4, config.ConnectVirtualIPCIDRv6); err != nil {
+-		return nil, fmt.Errorf("failed to configure virtual IP ranges: %w", err)
+-	}
+ 
+ 	// Create the tombstone GC.
+ 	gc, err := state.NewTombstoneGC(config.TombstoneTTL, config.TombstoneTTLGranularity)
+diff --git a/agent/consul/state/catalog.go b/agent/consul/state/catalog.go
+index 561689af35..b24929f101 100644
+--- a/agent/consul/state/catalog.go
++++ b/agent/consul/state/catalog.go
+@@ -42,6 +42,26 @@ const (
+ )
+ 
+ var (
++	// startingVirtualIP is the start of the virtual IP range we assign to services.
++	// The effective CIDR range is startingVirtualIP to (startingVirtualIP + virtualIPMaxOffset).
++	startingVirtualIP = net.IP{240, 0, 0, 0}
++
++	virtualIPMaxOffset = net.IP{15, 255, 255, 254}
++
++	startingVirtualIPv6 = net.IP{
++		0x20, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00,
++	}
++
++	virtualIPv6MaxOffset = net.IP{
++		0x1F, 0xFF, 0xFF, 0xFF,
++		0xFF, 0xFF, 0xFF, 0xFF,
++		0xFF, 0xFF, 0xFF, 0xFF,
++		0xFF, 0xFF, 0xFF, 0xFF,
++	}
++
+ 	ErrNodeNotFound = errors.New("node not found")
+ )
+ 
+@@ -1054,10 +1074,9 @@ func assignServiceVirtualIP(tx WriteTxn, idx uint64, psn structs.PeeredServiceNa
+ 				break
+ 			}
+ 		}
+-		cfg := currentVirtualIPConfig()
+-		maxIPOffset := cfg.maxOffsetFor(newEntry.IP)
+-		if maxIPOffset == nil {
+-			return "", fmt.Errorf("failed to determine max virtual IP offset for %q", newEntry.IP.String())
++		maxIPOffset := virtualIPMaxOffset
++		if p := net.ParseIP(newEntry.IP.String()); p == nil || p.To4() == nil {
++			maxIPOffset = virtualIPv6MaxOffset
+ 		}
+ 		// Out of virtual IPs, fail registration.
+ 		if newEntry.IP.Equal(maxIPOffset) {
+@@ -1213,7 +1232,6 @@ func updateVirtualIPMaxIndexes(txn WriteTxn, idx uint64, partition, peerName str
+ func addIPOffset(b net.IP) (net.IP, error) {
+ 	var vip net.IP
+ 	var err error
+-	cfg := currentVirtualIPConfig()
+ 
+ 	ds, err := netutil.IsDualStack(nil, true)
+ 	if err != nil {
+@@ -1221,9 +1239,9 @@ func addIPOffset(b net.IP) (net.IP, error) {
+ 	}
+ 
+ 	if ds {
+-		vip, err = addIPv6Offset(cfg.startingIPv6, b)
++		vip, err = addIPv6Offset(startingVirtualIPv6, b)
+ 	} else {
+-		vip, err = addIPv4Offset(cfg.startingIPv4, b)
++		vip, err = addIPv4Offset(startingVirtualIP, b)
+ 	}
+ 	return vip, err
+ }
+diff --git a/agent/consul/state/virtual_ips.go b/agent/consul/state/virtual_ips.go
+deleted file mode 100644
+index fbc9898f89..0000000000
+--- a/agent/consul/state/virtual_ips.go
++++ /dev/null
+@@ -1,157 +0,0 @@
+-// Copyright (c) HashiCorp, Inc.
+-// SPDX-License-Identifier: BUSL-1.1
+-
+-package state
+-
+-import (
+-	"fmt"
+-	"math/big"
+-	"net"
+-	"sync"
+-)
+-
+-const (
+-	// DefaultVirtualIPv4CIDR matches the historical 240.0.0.0/4 range used for auto-assigned
+-	// virtual IPs.
+-	DefaultVirtualIPv4CIDR = "240.0.0.0/4"
+-	// DefaultVirtualIPv6CIDR matches the historical 2000::/3 range used for auto-assigned
+-	// virtual IPs when dual-stack is enabled.
+-	DefaultVirtualIPv6CIDR = "2000::/3"
+-)
+-
+-type virtualIPAllocatorConfig struct {
+-	startingIPv4  net.IP
+-	maxOffsetIPv4 net.IP
+-	startingIPv6  net.IP
+-	maxOffsetIPv6 net.IP
+-}
+-
+-var (
+-	virtualIPConfigMu sync.RWMutex
+-	virtualIPConfig   = mustBuildVirtualIPConfig(DefaultVirtualIPv4CIDR, DefaultVirtualIPv6CIDR)
+-)
+-
+-func mustBuildVirtualIPConfig(v4CIDR, v6CIDR string) virtualIPAllocatorConfig {
+-	cfg, err := buildVirtualIPConfig(v4CIDR, v6CIDR)
+-	if err != nil {
+-		panic(err)
+-	}
+-	return cfg
+-}
+-
+-// SetVirtualIPConfig configures the allocator ranges for IPv4 and IPv6 virtual IPs. Empty strings
+-// fall back to defaults. It is expected to be called during server startup before any allocations
+-// occur.
+-func SetVirtualIPConfig(v4CIDR, v6CIDR string) error {
+-	cfg, err := buildVirtualIPConfig(v4CIDR, v6CIDR)
+-	if err != nil {
+-		return err
+-	}
+-
+-	virtualIPConfigMu.Lock()
+-	virtualIPConfig = cfg
+-	virtualIPConfigMu.Unlock()
+-	return nil
+-}
+-
+-// ValidateVirtualIPCIDRs checks that the provided CIDRs can be used for virtual IP allocation.
+-// Empty values are treated as defaults.
+-func ValidateVirtualIPCIDRs(v4CIDR, v6CIDR string) error {
+-	_, err := buildVirtualIPConfig(v4CIDR, v6CIDR)
+-	return err
+-}
+-
+-func currentVirtualIPConfig() virtualIPAllocatorConfig {
+-	virtualIPConfigMu.RLock()
+-	cfg := virtualIPConfig
+-	virtualIPConfigMu.RUnlock()
+-	return cfg
+-}
+-
+-func buildVirtualIPConfig(v4CIDR, v6CIDR string) (virtualIPAllocatorConfig, error) {
+-	cfg := virtualIPAllocatorConfig{}
+-
+-	if v4CIDR == "" {
+-		v4CIDR = DefaultVirtualIPv4CIDR
+-	}
+-	if v6CIDR == "" {
+-		v6CIDR = DefaultVirtualIPv6CIDR
+-	}
+-
+-	startV4, maxOffsetV4, err := parseVirtualIPCIDR(v4CIDR, net.IPv4len)
+-	if err != nil {
+-		return cfg, fmt.Errorf("invalid virtual_ip_cidr_v4: %w", err)
+-	}
+-	startV6, maxOffsetV6, err := parseVirtualIPCIDR(v6CIDR, net.IPv6len)
+-	if err != nil {
+-		return cfg, fmt.Errorf("invalid virtual_ip_cidr_v6: %w", err)
+-	}
+-
+-	cfg.startingIPv4 = startV4
+-	cfg.maxOffsetIPv4 = maxOffsetV4
+-	cfg.startingIPv6 = startV6
+-	cfg.maxOffsetIPv6 = maxOffsetV6
+-	return cfg, nil
+-}
+-
+-// parseVirtualIPCIDR returns the base network address and the maximum offset allowed (host space
+-// minus the broadcast address) for the given cidr. expectedLen should be net.IPv4len or
+-// net.IPv6len to ensure family matches.
+-func parseVirtualIPCIDR(cidr string, expectedLen int) (net.IP, net.IP, error) {
+-	ip, ipNet, err := net.ParseCIDR(cidr)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	ones, bits := ipNet.Mask.Size()
+-	if bits != expectedLen*8 {
+-		return nil, nil, fmt.Errorf("cidr %q must be IPv%d", cidr, expectedLen*8)
+-	}
+-	hostBits := bits - ones
+-	// Require at least 4 addresses (hostBits >= 2) to stay consistent with historical range that
+-	// reserved the broadcast address but allowed the network address.
+-	if hostBits < 2 {
+-		return nil, nil, fmt.Errorf("cidr %q must allow at least four addresses", cidr)
+-	}
+-
+-	base := ip.Mask(ipNet.Mask)
+-	if expectedLen == net.IPv4len {
+-		base = base.To4()
+-		if base == nil {
+-			return nil, nil, fmt.Errorf("cidr %q must be IPv4", cidr)
+-		}
+-		hostCount := uint64(1) << uint(hostBits)
+-		// Leave room for the broadcast address to mirror prior behavior.
+-		maxOffset := hostCount - 2
+-		return base, net.IPv4(byte(maxOffset>>24), byte(maxOffset>>16), byte(maxOffset>>8), byte(maxOffset)), nil
+-	}
+-
+-	// IPv6
+-	base = base.To16()
+-	if base == nil {
+-		return nil, nil, fmt.Errorf("cidr %q must be IPv6", cidr)
+-	}
+-
+-	hostCount := big.NewInt(0).Lsh(big.NewInt(1), uint(hostBits))
+-	hostCount.Sub(hostCount, big.NewInt(2))
+-	maxOffset := hostCount.Bytes()
+-
+-	// Left-pad to 16 bytes.
+-	if len(maxOffset) < net.IPv6len {
+-		padded := make([]byte, net.IPv6len)
+-		copy(padded[net.IPv6len-len(maxOffset):], maxOffset)
+-		maxOffset = padded
+-	}
+-
+-	return base, net.IP(maxOffset), nil
+-}
+-
+-func (cfg virtualIPAllocatorConfig) maxOffsetFor(ip net.IP) net.IP {
+-	if ip.To4() != nil {
+-		return cfg.maxOffsetIPv4
+-	}
+-	if ip.To16() != nil {
+-		return cfg.maxOffsetIPv6
+-	}
+-	return nil
+-}
+diff --git a/agent/consul/state/virtual_ips_test.go b/agent/consul/state/virtual_ips_test.go
+deleted file mode 100644
+index a68b6fd978..0000000000
+--- a/agent/consul/state/virtual_ips_test.go
++++ /dev/null
+@@ -1,50 +0,0 @@
+-// Copyright (c) HashiCorp, Inc.
+-// SPDX-License-Identifier: BUSL-1.1
+-
+-package state
+-
+-import (
+-	"net"
+-	"testing"
+-
+-	"github.com/stretchr/testify/require"
+-)
+-
+-func TestParseVirtualIPCIDRIPv4(t *testing.T) {
+-	base, max, err := parseVirtualIPCIDR("10.0.0.0/29", net.IPv4len)
+-	require.NoError(t, err)
+-	require.Equal(t, net.IPv4(10, 0, 0, 0).To4(), base)
+-	require.Equal(t, net.IPv4(0, 0, 0, 6), max)
+-}
+-
+-func TestParseVirtualIPCIDRIPv6(t *testing.T) {
+-	base, max, err := parseVirtualIPCIDR("fd00::/125", net.IPv6len)
+-	require.NoError(t, err)
+-	require.Equal(t, net.ParseIP("fd00::").To16(), base)
+-	require.Equal(t, net.ParseIP("::6").To16(), max)
+-}
+-
+-func TestParseVirtualIPCIDRTooSmall(t *testing.T) {
+-	_, _, err := parseVirtualIPCIDR("10.0.0.0/31", net.IPv4len)
+-	require.Error(t, err)
+-}
+-
+-func TestSetVirtualIPConfigOverrides(t *testing.T) {
+-	t.Cleanup(func() {
+-		require.NoError(t, SetVirtualIPConfig("", ""))
+-	})
+-
+-	require.NoError(t, SetVirtualIPConfig("10.0.0.0/29", "fd00::/125"))
+-	cfg := currentVirtualIPConfig()
+-
+-	// Validate starting points and max offsets are derived from the new ranges.
+-	v4Base, err := addIPv4Offset(cfg.startingIPv4, net.IPv4zero)
+-	require.NoError(t, err)
+-	require.Equal(t, "10.0.0.0", v4Base.String())
+-	require.Equal(t, net.IPv4(0, 0, 0, 6), cfg.maxOffsetIPv4)
+-
+-	v6Base, err := addIPv6Offset(cfg.startingIPv6, net.ParseIP("::"))
+-	require.NoError(t, err)
+-	require.Equal(t, "fd00::", v6Base.String())
+-	require.Equal(t, net.ParseIP("::6").To16(), cfg.maxOffsetIPv6)
+-}
