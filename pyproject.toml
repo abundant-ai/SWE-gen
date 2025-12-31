@@ -44,7 +44,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-harbor = { git = "https://github.com/rishidesai/harbor" }
+harbor = { git = "https://github.com/laude-institute/harbor" }
 terminal-bench = { git = "https://github.com/laude-institute/terminal-bench" }
 
 [build-system]
