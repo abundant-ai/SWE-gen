@@ -87,7 +87,3 @@ No write access to your repository is needed.
 pip install git+https://github.com/abundant-ai/taskgen.git
 taskgen create --repo owner/repo --pr 123
 ```
-
-## License
-
-Apache 2.0

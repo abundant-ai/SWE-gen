@@ -45,7 +45,7 @@ COPY src/ ./src/
 RUN uv sync --frozen
 
 # Copy action entrypoint
-COPY src/taskgen/action/entrypoint.sh /entrypoint.sh
+COPY action/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Set up environment

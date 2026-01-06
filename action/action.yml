@@ -82,7 +82,7 @@ outputs:
 
 runs:
   using: 'docker'
-  image: 'Dockerfile.action'
+  image: 'Dockerfile'
   env:
     GITHUB_TOKEN: ${{ inputs.github_token }}
     CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
