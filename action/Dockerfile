@@ -39,8 +39,8 @@ RUN npm install -g @anthropic-ai/claude-code
 ARG TASKGEN_REF=main
 RUN uv pip install --system "git+https://github.com/abundant-ai/taskgen.git@${TASKGEN_REF}"
 
-# Copy action entrypoint
-COPY action/entrypoint.sh /entrypoint.sh
+# Copy action entrypoint (from action/ subdirectory context)
+COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 WORKDIR /workspace
