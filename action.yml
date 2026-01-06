@@ -1,0 +1,93 @@
+# Harbor Task Checker - GitHub Action
+# 
+# Checks if a PR in your repository can become a Harbor task for LLM training/eval.
+# Learn more: https://github.com/abundant-ai/taskgen
+
+name: 'Harbor Task Checker'
+description: 'Check if a PR can become a Harbor task for LLM training/evaluation'
+author: 'Abundant AI'
+
+branding:
+  icon: 'check-circle'
+  color: 'blue'
+
+inputs:
+  github_token:
+    description: 'GitHub token for API access'
+    required: true
+    default: ${{ github.token }}
+  
+  anthropic_api_key:
+    description: 'Anthropic API key for Claude Code (required for full validation)'
+    required: false
+  
+  openai_api_key:
+    description: 'OpenAI API key for PR evaluation'
+    required: false
+  
+  skip_validation:
+    description: 'Skip Harbor NOP/Oracle Docker validation (faster but less accurate)'
+    required: false
+    default: 'false'
+  
+  skip_llm_check:
+    description: 'Skip LLM-based substantiality evaluation'
+    required: false
+    default: 'false'
+  
+  require_merged:
+    description: 'Only check merged PRs (set to false for early feedback on open PRs)'
+    required: false
+    default: 'false'
+  
+  min_source_files:
+    description: 'Minimum number of source files required (default: 3)'
+    required: false
+    default: '3'
+  
+  max_source_files:
+    description: 'Maximum number of source files to avoid large refactors (default: 10)'
+    required: false
+    default: '10'
+  
+  cc_timeout:
+    description: 'Timeout for Claude Code session in seconds (default: 1800)'
+    required: false
+    default: '1800'
+  
+  target_repo:
+    description: 'Target repository for task submissions (where tasks are stored)'
+    required: false
+    default: 'abundant-ai/taskgen'
+
+outputs:
+  eligible:
+    description: 'Whether the PR is eligible (true/false)'
+  
+  reason:
+    description: 'Human-readable explanation of eligibility result'
+  
+  task_id:
+    description: 'Generated task ID (if eligible)'
+  
+  artifact_name:
+    description: 'Name of uploaded artifact containing the task (if eligible)'
+  
+  submit_url:
+    description: 'URL to submit task to target repository (if eligible)'
+
+runs:
+  using: 'docker'
+  image: 'Dockerfile.action'
+  env:
+    GITHUB_TOKEN: ${{ inputs.github_token }}
+    ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+    OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+    INPUT_SKIP_VALIDATION: ${{ inputs.skip_validation }}
+    INPUT_SKIP_LLM_CHECK: ${{ inputs.skip_llm_check }}
+    INPUT_REQUIRE_MERGED: ${{ inputs.require_merged }}
+    INPUT_MIN_SOURCE_FILES: ${{ inputs.min_source_files }}
+    INPUT_MAX_SOURCE_FILES: ${{ inputs.max_source_files }}
+    INPUT_CC_TIMEOUT: ${{ inputs.cc_timeout }}
+    INPUT_TARGET_REPO: ${{ inputs.target_repo }}
+

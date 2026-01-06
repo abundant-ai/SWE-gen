@@ -1,0 +1,102 @@
+# Harbor Task Checker
+# 
+# This workflow checks if PRs in this repository can become Harbor tasks
+# for LLM training and evaluation.
+#
+# To use: Copy this file to .github/workflows/harbor-check.yml
+#
+# Learn more: https://github.com/abundant-ai/taskgen
+
+name: Harbor Task Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  
+  # Uncomment to only check merged PRs:
+  # pull_request:
+  #   types: [closed]
+  # (and set require_merged: true below)
+
+jobs:
+  check-harbor-eligibility:
+    runs-on: ubuntu-latest
+    
+    # Skip if PR is closed without merging (when using closed trigger)
+    # if: github.event.pull_request.merged == true
+    
+    permissions:
+      contents: read
+      actions: write        # Required for artifact upload
+      pull-requests: read   # Required to read PR details
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for diff generation
+      
+      - name: Check Harbor Task Eligibility
+        id: harbor-check
+        uses: abundant-ai/taskgen@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          
+          # === API Keys (Optional but Recommended) ===
+          # These enable full validation. Without them, only basic checks run.
+          #
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          
+          # === Configuration ===
+          
+          # Skip Docker-based NOP/Oracle validation (faster, but less accurate)
+          # Useful for quick feedback without API keys
+          # skip_validation: true
+          
+          # Skip LLM-based substantiality check
+          # skip_llm_check: true
+          
+          # Only check merged PRs (more conservative)
+          # require_merged: true
+          
+          # Source file requirements (default: 3-10)
+          # min_source_files: 3
+          # max_source_files: 10
+          
+          # Claude Code timeout in seconds (default: 1800 = 30 min)
+          # cc_timeout: 1800
+          
+          # Target repo for task submissions (default: abundant-ai/taskgen)
+          # target_repo: abundant-ai/taskgen
+      
+      # Upload task artifact (if eligible)
+      - name: Upload Task Artifact
+        if: steps.harbor-check.outputs.eligible == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.harbor-check.outputs.artifact_name }}
+          path: /tmp/harbor-tasks/${{ steps.harbor-check.outputs.task_id }}
+          retention-days: 30
+      
+      # Optional: Add comment to PR with results
+      # - name: Comment on PR
+      #   if: always()
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       const eligible = '${{ steps.harbor-check.outputs.eligible }}' === 'true';
+      #       const reason = '${{ steps.harbor-check.outputs.reason }}';
+      #       const taskId = '${{ steps.harbor-check.outputs.task_id }}';
+      #       
+      #       const body = eligible
+      #         ? `✅ **Harbor Task Eligible**\n\nThis PR can become task \`${taskId}\`. See the workflow summary for submission instructions.`
+      #         : `ℹ️ **Not Harbor Task Eligible**\n\n${reason}`;
+      #       
+      #       github.rest.issues.createComment({
+      #         issue_number: context.issue.number,
+      #         owner: context.repo.owner,
+      #         repo: context.repo.repo,
+      #         body: body
+      #       });
+
