@@ -38,7 +38,7 @@ jobs:
       
       - name: Check Harbor Task Eligibility
         id: harbor-check
-        uses: abundant-ai/taskgen@v1
+        uses: abundant-ai/taskgen/action@main
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           

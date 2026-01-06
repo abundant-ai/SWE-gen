@@ -35,18 +35,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install Claude Code CLI
 RUN npm install -g @anthropic-ai/claude-code
 
-WORKDIR /taskgen
-
-# Copy taskgen source and install
-COPY pyproject.toml uv.lock README.md ./
-COPY src/ ./src/
-
-# Install taskgen with all dependencies
-RUN uv sync --frozen
+# Install taskgen from GitHub (uses the same ref as the action)
+ARG TASKGEN_REF=main
+RUN uv pip install --system "git+https://github.com/abundant-ai/taskgen.git@${TASKGEN_REF}"
 
 # Copy action entrypoint
 COPY action/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+WORKDIR /workspace
 
 # Set up environment
 ENV PYTHONUNBUFFERED=1

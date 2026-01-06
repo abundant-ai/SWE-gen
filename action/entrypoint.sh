@@ -104,10 +104,7 @@ TASK_ID=$(echo "$TASK_ID" | tr '[:upper:]' '[:lower:]')
 echo "::group::Building taskgen command"
 echo "Task ID: $TASK_ID"
 
-# Run taskgen from its installation directory
-cd /taskgen
-
-CMD="uv run taskgen create"
+CMD="taskgen create"
 CMD+=" --repo $REPO"
 CMD+=" --pr $PR_NUMBER"
 CMD+=" --output $TASK_OUTPUT"

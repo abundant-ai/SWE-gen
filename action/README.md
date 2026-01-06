@@ -26,7 +26,7 @@ jobs:
         with:
           fetch-depth: 0
       
-      - uses: abundant-ai/taskgen@v1
+      - uses: abundant-ai/taskgen/action@main
         id: harbor-check
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
