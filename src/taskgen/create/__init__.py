@@ -1,4 +1,4 @@
-from taskgen.tools.validation import ValidationError
+from taskgen.tools.validate_utils import ValidationError
 
 from .claude_code_runner import MakeItWorkResult
 from .diff_utils import extract_test_files, generate_diffs

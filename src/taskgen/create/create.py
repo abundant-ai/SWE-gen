@@ -19,7 +19,7 @@ from rich.traceback import install as rich_traceback_install
 from taskgen.config import CreateConfig
 from taskgen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
 from taskgen.tools.network_isolation import network_isolation
-from taskgen.tools.validation import ValidationError, run_nop_oracle
+from taskgen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
 from .claude_code_runner import MakeItWorkResult, run_make_it_work_session
@@ -98,13 +98,15 @@ def _check_dedupe(
         return False
 
     last_rec = None
+    logger = logging.getLogger("taskgen")
     with open(state_file) as f:
         for line in f:
             try:
                 rec = json.loads(line)
                 if rec.get("key") == repo_key:
                     last_rec = rec
-            except Exception:
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                logger.debug(f"Failed to parse state record line: {e}")
                 continue
 
     if last_rec is not None:
@@ -256,8 +258,9 @@ def _save_state_record(
 ) -> None:
     """Save a record of the generated task to the state file.
 
-    This is non-fatal - errors are silently ignored.
+    This is non-fatal - errors are logged but do not stop execution.
     """
+    logger = logging.getLogger("taskgen")
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
         rec = {
@@ -270,9 +273,12 @@ def _save_state_record(
         }
         with open(state_file, "a") as f:
             f.write(json.dumps(rec) + "\n")
-    except Exception:
-        # Non-fatal; continue
-        pass
+    except (OSError, IOError, PermissionError, ValueError) as e:
+        # Non-fatal; log but continue
+        logger.warning(f"Failed to save state record for {repo_key}: {e}")
+    except Exception as e:
+        # Catch-all for unexpected errors, but still log them
+        logger.warning(f"Unexpected error saving state record for {repo_key}: {e}", exc_info=True)
 
 
 def _display_summary_panel(

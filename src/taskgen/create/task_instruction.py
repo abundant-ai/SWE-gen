@@ -8,6 +8,12 @@ from openai import OpenAI
 from .utils import CombinedPRTaskEvaluation
 
 MAX_LINKED_ISSUES = 5
+MAX_ISSUE_BODY_LENGTH = 2500
+MAX_PR_BODY_LENGTH = 2500
+MIN_INSTRUCTION_LENGTH = 100
+OPENAI_API_TIMEOUT = 90.0
+MAX_COMPLETION_TOKENS = 4096
+DEBUG_REASON_TRUNCATE_LENGTH = 100
 
 COMBINED_SYSTEM_PROMPT = """You are evaluating GitHub pull requests and converting substantial ones into Harbor tasks.
 
@@ -137,8 +143,8 @@ def _format_user_prompt(
             issue_title = issue.get("title", "")
             issue_body = (issue.get("body", "") or "").strip()
             # Truncate issue body if too long
-            if len(issue_body) > 2500:
-                issue_body = issue_body[:2500] + "\n...(truncated)"
+            if len(issue_body) > MAX_ISSUE_BODY_LENGTH:
+                issue_body = issue_body[:MAX_ISSUE_BODY_LENGTH] + "\n...(truncated)"
 
             issue_lines.append(f"Issue #{issue_num}: {issue_title}")
             if issue_body:
@@ -156,8 +162,8 @@ def _format_user_prompt(
 
     # MODE 2: No linked issue - use PR title + body, but warn LLM about solution leakage
     pr_body_truncated = (pr_body or "").strip()
-    if len(pr_body_truncated) > 2500:
-        pr_body_truncated = pr_body_truncated[:2500] + "\n...(truncated)"
+    if len(pr_body_truncated) > MAX_PR_BODY_LENGTH:
+        pr_body_truncated = pr_body_truncated[:MAX_PR_BODY_LENGTH] + "\n...(truncated)"
 
     return (
         f"Repository: {repo}\n"
@@ -225,7 +231,7 @@ def evaluate_and_generate_task(
 
     client = OpenAI(
         api_key=api_key or os.getenv("OPENAI_API_KEY"),
-        timeout=90.0,  # Longer timeout for reasoning models
+        timeout=OPENAI_API_TIMEOUT,  # Longer timeout for reasoning models
     )
 
     try:
@@ -237,7 +243,7 @@ def evaluate_and_generate_task(
                 {"role": "user", "content": user_prompt},
             ],
             response_format=CombinedPRTaskEvaluation,
-            max_completion_tokens=4096,
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
             # reasoning_effort="low", # TODO: reasoning level?
         )
 
@@ -246,7 +252,7 @@ def evaluate_and_generate_task(
             raise RuntimeError("LLM returned no parsed result")
 
         logger.debug(
-            f"Combined evaluation: is_substantial={result.is_substantial}, reason={result.reason[:100]}..."
+            f"Combined evaluation: is_substantial={result.is_substantial}, reason={result.reason[:DEBUG_REASON_TRUNCATE_LENGTH]}..."
         )
 
         # Post-process: validate tags if substantial
@@ -256,12 +262,12 @@ def evaluate_and_generate_task(
                 raise RuntimeError(f"LLM generated only {len(result.tags)} tags")
 
             # Validate instruction length
-            if not result.instruction or len(result.instruction.strip()) < 100:
+            if not result.instruction or len(result.instruction.strip()) < MIN_INSTRUCTION_LENGTH:
                 logger.error(
                     f"❌ LLM generated instruction too short: {len(result.instruction) if result.instruction else 0} chars"
                 )
                 raise RuntimeError(
-                    f"Instruction too short: {len(result.instruction) if result.instruction else 0} chars (need 100+)"
+                    f"Instruction too short: {len(result.instruction) if result.instruction else 0} chars (need {MIN_INSTRUCTION_LENGTH}+)"
                 )
 
             # Ensure defaults
@@ -273,5 +279,7 @@ def evaluate_and_generate_task(
         return result
 
     except Exception as exc:
-        logger.error(f"Combined LLM call failed: {exc}")
+        # Log the specific exception type for better debugging
+        exc_type = type(exc).__name__
+        logger.error(f"Combined LLM call failed ({exc_type}): {exc}")
         raise RuntimeError(f"Combined LLM call failed: {exc}") from exc

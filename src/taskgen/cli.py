@@ -17,7 +17,7 @@ from taskgen.farm import StreamFarmer
 from taskgen.analyze import AnalyzeArgs, run_analyze, TrialClassifier, write_trial_analysis_files
 from taskgen.tools.clean import run_clean
 from taskgen.tools.validate import ValidateArgs, run_validate
-from taskgen.tools.validation import ValidationError
+from taskgen.tools.validate_utils import ValidationError
 
 load_dotenv()
 
