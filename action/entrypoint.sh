@@ -178,9 +178,15 @@ if [[ $EXIT_CODE -eq 0 && -d "$TASK_DIR" ]]; then
     # Write task directory path for artifact upload step
     echo "$TASK_DIR" > /tmp/task_dir_path
     
-    # Generate submit URL (links to taskgen's ingest workflow)
+    # Generate submit URL with pre-filled workflow dispatch parameters
+    # Note: GitHub doesn't support auto-triggering workflows from external repos,
+    # so user must manually click "Run workflow" button
     SUBMIT_URL="https://github.com/$TARGET_REPO/actions/workflows/ingest-task.yml"
     echo "submit_url=$SUBMIT_URL" >> "$GITHUB_OUTPUT"
+    
+    # Get current run ID for artifact reference
+    RUN_ID="${GITHUB_RUN_ID}"
+    echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
     
     # Determine validation status text
     if [[ "$SKIP_VALIDATION" == "true" ]]; then
@@ -213,11 +219,16 @@ This PR meets all criteria to become a Harbor task for LLM training/evaluation!
 
 To submit this task for inclusion in the Harbor dataset:
 
-1. Download the task artifact from this workflow run
-2. Go to [$TARGET_REPO]($SUBMIT_URL)
-3. Submit via workflow dispatch with the artifact
+1. **[Click here to open the submission workflow →]($SUBMIT_URL)**
+2. Click the **"Run workflow"** button (top right)
+3. Fill in the parameters:
+   - \`source_repo\`: \`$REPO\`
+   - \`source_pr\`: \`$PR_NUMBER\`
+   - \`source_run_id\`: \`$RUN_ID\`
+   - \`task_id\`: \`$TASK_ID\`
+4. Click **"Run workflow"**
 
-[![Submit to Harbor](https://img.shields.io/badge/Submit_to_Harbor-0066CC?style=for-the-badge&logo=github&logoColor=white)]($SUBMIT_URL)
+A PR will be automatically created in \`$TARGET_REPO\` with your task!
 
 > **What happens next?**
 > 1. A PR will be opened in \`$TARGET_REPO\`
