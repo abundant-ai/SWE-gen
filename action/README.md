@@ -1,4 +1,4 @@
-# Harbor Task Checker - GitHub Action
+# Harbor Task Validator - GitHub Action
 
 Automatically check if PRs in your repository can become [Harbor](https://github.com/laude-institute/harbor) tasks for LLM training and evaluation.
 
