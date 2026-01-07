@@ -53,5 +53,13 @@ Most PRs won't be eligible—and that's fine!
 
 When a PR passes validation:
 - ✅ Job Summary shows validation results
-- 📦 Task artifact is uploaded (can be downloaded for manual submission)
-- 🎯 Developers get immediate feedback on task quality
+- 📦 Task artifact is uploaded to the workflow run
+- 📤 **One-click submission** to [Task Bank](https://github.com/abundant-ai/task-bank) for review
+
+### Submitting to Task Bank
+
+Click the **"Submit to Task Bank"** button in the Job Summary to contribute your task. This opens a pre-filled issue that triggers automatic import. Maintainers review submissions before adding them to the training set.
+
+```
+Your PR passes → Click Submit → Issue created → PR opened → Reviewed → Merged
+```
