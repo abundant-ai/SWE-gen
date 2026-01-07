@@ -58,11 +58,6 @@ inputs:
     description: 'Timeout for Claude Code session in seconds (default: 1800)'
     required: false
     default: '1800'
-  
-  target_repo:
-    description: 'Target repository for task submissions (where tasks are stored)'
-    required: false
-    default: 'abundant-ai/taskgen'
 
 outputs:
   eligible:
@@ -76,23 +71,43 @@ outputs:
   
   artifact_name:
     description: 'Name of uploaded artifact containing the task (if eligible)'
-  
-  submit_url:
-    description: 'URL to submit task to target repository (if eligible)'
 
 runs:
-  using: 'docker'
-  image: 'Dockerfile'
-  env:
-    GITHUB_TOKEN: ${{ inputs.github_token }}
-    CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
-    ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
-    OPENAI_API_KEY: ${{ inputs.openai_api_key }}
-    INPUT_SKIP_VALIDATION: ${{ inputs.skip_validation }}
-    INPUT_SKIP_LLM_CHECK: ${{ inputs.skip_llm_check }}
-    INPUT_REQUIRE_MERGED: ${{ inputs.require_merged }}
-    INPUT_MIN_SOURCE_FILES: ${{ inputs.min_source_files }}
-    INPUT_MAX_SOURCE_FILES: ${{ inputs.max_source_files }}
-    INPUT_CC_TIMEOUT: ${{ inputs.cc_timeout }}
-    INPUT_TARGET_REPO: ${{ inputs.target_repo }}
+  using: 'composite'
+  steps:
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.13'
+    
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+    
+    - name: Install Claude Code CLI
+      shell: bash
+      run: npm install -g @anthropic-ai/claude-code
+    
+    - name: Install taskgen
+      shell: bash
+      run: uv pip install --system git+https://github.com/abundant-ai/taskgen.git@${{ github.action_ref || 'main' }}
+    
+    - name: Run Harbor Task Check
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude_code_oauth_token }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_SKIP_VALIDATION: ${{ inputs.skip_validation }}
+        INPUT_SKIP_LLM_CHECK: ${{ inputs.skip_llm_check }}
+        INPUT_REQUIRE_MERGED: ${{ inputs.require_merged }}
+        INPUT_MIN_SOURCE_FILES: ${{ inputs.min_source_files }}
+        INPUT_MAX_SOURCE_FILES: ${{ inputs.max_source_files }}
+        INPUT_CC_TIMEOUT: ${{ inputs.cc_timeout }}
+      run: ${{ github.action_path }}/entrypoint.sh
 

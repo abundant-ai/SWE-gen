@@ -1,66 +1,34 @@
 # Harbor Task Checker - GitHub Action
 
-Automatically check if PRs in your repository can become [Harbor](https://github.com/laude-institute/harbor) tasks for LLM training.
+Automatically check if PRs in your repository can become [Harbor](https://github.com/laude-institute/harbor) tasks for LLM training and evaluation.
 
-## Quick Start
+## Installation
 
-Add `.github/workflows/harbor-check.yml` to your repository:
+**1. Run this command** in your repo:
 
-```yaml
-name: Harbor Task Check
-
-on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: write
-      pull-requests: read
-    
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - uses: abundant-ai/taskgen/action@main
-        id: harbor-check
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          # Optional: Enable full validation
-          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}  # Preferred
-          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}              # Or use API key
-          # openai_api_key: ${{ secrets.OPENAI_API_KEY }}
-      
-      - uses: actions/upload-artifact@v4
-        if: steps.harbor-check.outputs.eligible == 'true'
-        with:
-          name: ${{ steps.harbor-check.outputs.artifact_name }}
-          path: /tmp/harbor-tasks/${{ steps.harbor-check.outputs.task_id }}
+```bash
+mkdir -p .github/workflows && curl -o .github/workflows/harbor-check.yml https://raw.githubusercontent.com/abundant-ai/taskgen/main/action/workflow-template.yml
 ```
 
-That's it! PRs will now show eligibility status in the Job Summary.
-
-## Requirements
-- **Claude Code** - Requires ONE of:
-  - `CLAUDE_CODE_OAUTH_TOKEN` (preferred)
-  - `ANTHROPIC_API_KEY`
+**2. Add secrets** (`Settings` → `Secrets and variables` → `Actions`):
+- `CLAUDE_CODE_OAUTH_TOKEN` (or `ANTHROPIC_API_KEY`)
 - `OPENAI_API_KEY`
 
-Without Claude Code credentials, the action only checks basic eligibility (file counts, test presence). With credentials, it runs full Docker validation to ensure the task builds and passes Harbor's NOP/Oracle checks.
+**3. Commit and push:**
+
+```bash
+git add .github/workflows/harbor-check.yml && git commit -m "Add Harbor task validation" && git push
+```
 
 ## What Makes a PR Eligible?
 
 | Requirement | Why |
 |-------------|-----|
-| 3-10 source files modified | Multi-component fixes make better training data |
-| Includes test changes | Tests validate the fix works |
 | Substantial changes | Not just docs, formatting, or version bumps |
+| Includes test changes | Tests validate the fix works |
+| 3-10 source files modified | Multi-component fixes make better tasks |
 
-Most PRs (~90%) won't be eligible—and that's fine! The action explains why.
+Most PRs won't be eligible—and that's fine!
 
 ## Configuration
 
@@ -81,17 +49,9 @@ Most PRs (~90%) won't be eligible—and that's fine! The action explains why.
 | `reason` | Why the PR is/isn't eligible |
 | `task_id` | Task ID like `owner__repo-123` |
 
-## How Submission Works
+## What Happens Next?
 
-1. PR passes validation → Job Summary shows "Submit to Harbor" button
-2. Developer clicks button → Triggers workflow in taskgen repo
-3. PR is created with the task → Maintainer reviews and merges
-
-No write access to your repository is needed.
-
-## Local Testing
-
-```bash
-uv pip install git+https://github.com/abundant-ai/taskgen.git
-taskgen create --repo owner/repo --pr 123
-```
+When a PR passes validation:
+- ✅ Job Summary shows validation results
+- 📦 Task artifact is uploaded (can be downloaded for manual submission)
+- 🎯 Developers get immediate feedback on task quality

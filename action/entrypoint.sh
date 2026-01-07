@@ -51,7 +51,6 @@ REQUIRE_MERGED="${INPUT_REQUIRE_MERGED:-false}"
 MIN_SOURCE_FILES="${INPUT_MIN_SOURCE_FILES:-3}"
 MAX_SOURCE_FILES="${INPUT_MAX_SOURCE_FILES:-10}"
 CC_TIMEOUT="${INPUT_CC_TIMEOUT:-1800}"
-TARGET_REPO="${INPUT_TARGET_REPO:-abundant-ai/taskgen}"
 
 # Check if PR needs to be merged
 if [[ "$REQUIRE_MERGED" == "true" && "$PR_MERGED" != "true" ]]; then
@@ -178,10 +177,6 @@ if [[ $EXIT_CODE -eq 0 && -d "$TASK_DIR" ]]; then
     # Write task directory path for artifact upload step
     echo "$TASK_DIR" > /tmp/task_dir_path
     
-    # Generate submit URL (links to taskgen's ingest workflow)
-    SUBMIT_URL="https://github.com/$TARGET_REPO/actions/workflows/ingest-task.yml"
-    echo "submit_url=$SUBMIT_URL" >> "$GITHUB_OUTPUT"
-    
     # Determine validation status text
     if [[ "$SKIP_VALIDATION" == "true" ]]; then
         VALIDATION_STATUS="⚠️ Skipped (no API key)"
@@ -209,20 +204,9 @@ This PR meets all criteria to become a Harbor task for LLM training/evaluation!
 | **Source** | [$REPO#$PR_NUMBER](https://github.com/$REPO/pull/$PR_NUMBER) |
 | **Validation** | $VALIDATION_STATUS |
 
-## 🚀 Submit to Harbor Dataset
+## 📦 Task Artifact Available
 
-To submit this task for inclusion in the Harbor dataset:
-
-1. Download the task artifact from this workflow run
-2. Go to [$TARGET_REPO]($SUBMIT_URL)
-3. Submit via workflow dispatch with the artifact
-
-[![Submit to Harbor](https://img.shields.io/badge/Submit_to_Harbor-0066CC?style=for-the-badge&logo=github&logoColor=white)]($SUBMIT_URL)
-
-> **What happens next?**
-> 1. A PR will be opened in \`$TARGET_REPO\`
-> 2. Maintainers will review the task
-> 3. Once merged, your fix becomes part of the Harbor training dataset!
+The validated Harbor task has been uploaded as a workflow artifact and can be downloaded from this workflow run.
 
 ## What This Means
 
@@ -231,13 +215,9 @@ Your PR demonstrates:
 - Proper test coverage (tests fail on buggy baseline, pass with fix)
 - Changes substantial enough for LLM training
 
-The generated task will:
-- Start with a "buggy" baseline (your PR changes reversed)
-- Challenge AI agents to reproduce your fix
-- Use your tests to validate correctness
-
 ---
 
+<details>
 <summary>📋 Instruction Preview</summary>
 
 \`\`\`markdown
@@ -287,15 +267,11 @@ else
     cat >> "$GITHUB_STEP_SUMMARY" << EOF
 # $EMOJI Not Harbor Task Eligible
 
-This PR does not currently meet the criteria for a Harbor task.
-
 ## Reason
 
 $REASON
 
-## Requirements for Harbor Tasks
-
-For a PR to become a Harbor task, it must:
+## Task Requirements
 
 | Requirement | Description |
 |-------------|-------------|
