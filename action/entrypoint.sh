@@ -92,8 +92,9 @@ fi
 # Build taskgen command
 # -----------------------------------------------------------------------------
 
-TASK_OUTPUT="/tmp/harbor-tasks"
-STATE_DIR="/tmp/.state"
+# Use GITHUB_WORKSPACE so artifacts persist between steps
+TASK_OUTPUT="${GITHUB_WORKSPACE:-/tmp}/harbor-tasks"
+STATE_DIR="${GITHUB_WORKSPACE:-/tmp}/.state"
 mkdir -p "$TASK_OUTPUT" "$STATE_DIR"
 
 # Generate task ID (lowercase, replace / with __)
@@ -113,6 +114,7 @@ CMD+=" --no-require-issue"  # Don't require linked issue for action
 CMD+=" --min-source-files $MIN_SOURCE_FILES"
 CMD+=" --max-source-files $MAX_SOURCE_FILES"
 CMD+=" --cc-timeout $CC_TIMEOUT"
+CMD+=" --verbose"
 
 # Allow unmerged PRs in CI (for testing/preview on open PRs)
 if [[ "$REQUIRE_MERGED" != "true" ]]; then

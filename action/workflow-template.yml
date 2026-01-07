@@ -74,7 +74,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.harbor-check.outputs.artifact_name }}
-          path: /tmp/harbor-tasks/${{ steps.harbor-check.outputs.task_id }}
+          path: ${{ github.workspace }}/harbor-tasks/${{ steps.harbor-check.outputs.task_id }}
           retention-days: 30
       
       # Optional: Add comment to PR with results
