@@ -62,15 +62,19 @@ inputs:
 outputs:
   eligible:
     description: 'Whether the PR is eligible (true/false)'
+    value: ${{ steps.run-check.outputs.eligible }}
   
   reason:
     description: 'Human-readable explanation of eligibility result'
+    value: ${{ steps.run-check.outputs.reason }}
   
   task_id:
     description: 'Generated task ID (if eligible)'
+    value: ${{ steps.run-check.outputs.task_id }}
   
   artifact_name:
     description: 'Name of uploaded artifact containing the task (if eligible)'
+    value: ${{ steps.run-check.outputs.artifact_name }}
 
 runs:
   using: 'composite'
@@ -97,6 +101,7 @@ runs:
       run: uv pip install --system git+https://github.com/abundant-ai/taskgen.git@${{ github.action_ref || 'main' }}
     
     - name: Run Harbor Task Check
+      id: run-check
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
