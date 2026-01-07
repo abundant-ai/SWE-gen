@@ -58,11 +58,6 @@ inputs:
     description: 'Timeout for Claude Code session in seconds (default: 1800)'
     required: false
     default: '1800'
-  
-  target_repo:
-    description: 'Target repository for task submissions (where tasks are stored)'
-    required: false
-    default: 'abundant-ai/taskgen'
 
 outputs:
   eligible:
@@ -114,6 +109,5 @@ runs:
         INPUT_MIN_SOURCE_FILES: ${{ inputs.min_source_files }}
         INPUT_MAX_SOURCE_FILES: ${{ inputs.max_source_files }}
         INPUT_CC_TIMEOUT: ${{ inputs.cc_timeout }}
-        INPUT_TARGET_REPO: ${{ inputs.target_repo }}
       run: ${{ github.action_path }}/entrypoint.sh
 

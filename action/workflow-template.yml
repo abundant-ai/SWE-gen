@@ -38,7 +38,7 @@ jobs:
       
       - name: Check Harbor Task Eligibility
         id: harbor-check
-        uses: abundant-ai/taskgen/action@main
+        uses: abundant-ai/taskgen/action@v1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           
@@ -69,9 +69,6 @@ jobs:
           
           # Claude Code timeout in seconds (default: 1800 = 30 min)
           # cc_timeout: 1800
-          
-          # Target repo for task submissions (default: abundant-ai/taskgen)
-          # target_repo: abundant-ai/taskgen
       
       # Upload task artifact (if eligible)
       - name: Upload Task Artifact

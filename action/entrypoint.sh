@@ -51,7 +51,6 @@ REQUIRE_MERGED="${INPUT_REQUIRE_MERGED:-false}"
 MIN_SOURCE_FILES="${INPUT_MIN_SOURCE_FILES:-3}"
 MAX_SOURCE_FILES="${INPUT_MAX_SOURCE_FILES:-10}"
 CC_TIMEOUT="${INPUT_CC_TIMEOUT:-1800}"
-TARGET_REPO="${INPUT_TARGET_REPO:-abundant-ai/taskgen}"
 
 # Check if PR needs to be merged
 if [[ "$REQUIRE_MERGED" == "true" && "$PR_MERGED" != "true" ]]; then
@@ -205,11 +204,9 @@ This PR meets all criteria to become a Harbor task for LLM training/evaluation!
 | **Source** | [$REPO#$PR_NUMBER](https://github.com/$REPO/pull/$PR_NUMBER) |
 | **Validation** | $VALIDATION_STATUS |
 
-## 📦 Task Artifact
+## 📦 Task Artifact Available
 
-The validated Harbor task has been uploaded as a workflow artifact.
-
-You can download it from this workflow run to inspect or submit manually.
+The validated Harbor task has been uploaded as a workflow artifact and can be downloaded from this workflow run.
 
 ## What This Means
 
@@ -218,13 +215,9 @@ Your PR demonstrates:
 - Proper test coverage (tests fail on buggy baseline, pass with fix)
 - Changes substantial enough for LLM training
 
-The generated task will:
-- Start with a "buggy" baseline (your PR changes reversed)
-- Challenge AI agents to reproduce your fix
-- Use your tests to validate correctness
-
 ---
 
+<details>
 <summary>📋 Instruction Preview</summary>
 
 \`\`\`markdown
@@ -274,15 +267,11 @@ else
     cat >> "$GITHUB_STEP_SUMMARY" << EOF
 # $EMOJI Not Harbor Task Eligible
 
-This PR does not currently meet the criteria for a Harbor task.
-
 ## Reason
 
 $REASON
 
-## Requirements for Harbor Tasks
-
-For a PR to become a Harbor task, it must:
+## Task Requirements
 
 | Requirement | Description |
 |-------------|-------------|
