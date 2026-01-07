@@ -81,13 +81,12 @@ Most PRs (~90%) won't be eligible—and that's fine! The action explains why.
 | `reason` | Why the PR is/isn't eligible |
 | `task_id` | Task ID like `owner__repo-123` |
 
-## How Submission Works
+## What Happens Next?
 
-1. PR passes validation → Job Summary shows "Submit to Harbor" button
-2. Developer clicks button → Triggers workflow in taskgen repo
-3. PR is created with the task → Maintainer reviews and merges
-
-No write access to your repository is needed.
+When a PR passes validation:
+- ✅ Job Summary shows validation results
+- 📦 Task artifact is uploaded (can be downloaded for manual submission)
+- 🎯 Developers get immediate feedback on task quality
 
 ## Local Testing
 
