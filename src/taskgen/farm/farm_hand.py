@@ -56,6 +56,7 @@ class TaskResult:
     message: str
     duration_seconds: float
     timestamp: str
+    category: str = None  # Category for detailed tracking
 
 
 def _cleanup_task(task_id: str, tasks_root: Path, console: Console) -> None:
@@ -72,29 +73,45 @@ def _cleanup_task(task_id: str, tasks_root: Path, console: Console) -> None:
         console.print(f"[dim]Cleaned up incomplete task directory: {task_id}[/dim]")
 
 
-def _classify_failure(stderr: str) -> str:
+def _classify_failure(stderr: str) -> tuple[str, str]:
+    """Classify failure reason and return (category, message).
+    
+    Categories:
+    - trivial: Trivial PR (too small/simple)
+    - no_issue: No linked issue
+    - no_tests: No tests detected
+    - validation_failed: Harbor validation failed
+    - already_exists: Task already exists
+    - rate_limit: GitHub API rate limit
+    - quota_exceeded: OpenAI quota exceeded
+    - timeout: Command timeout
+    - git_error: Git checkout/commit errors
+    - other: Unknown/other errors
+    """
     lowered = stderr.lower()
     if "trivial" in stderr:
-        return "Trivial PR (skipped)"
+        return "trivial", "Trivial PR (skipped)"
     if "no linked issue" in lowered or "missingissueerror" in lowered:
-        return "No linked issue (skipped)"
+        return "no_issue", "No linked issue (skipped)"
     if "validation failed" in lowered or "harbor validation" in lowered:
-        return "Validation failed (NOP or Oracle)"
+        return "validation_failed", "Validation failed (NOP or Oracle)"
     if "task already exists" in lowered or "file exists" in lowered:
-        return "Task already exists (skipped)"
+        return "already_exists", "Task already exists (skipped)"
     if "no test" in stderr:
-        return "No tests detected"
+        return "no_tests", "No tests detected"
     if "rate limit exceeded" in lowered and "github" in lowered:
-        return "GitHub API rate limit exceeded (set GITHUB_TOKEN)"
+        return "rate_limit", "GitHub API rate limit exceeded (set GITHUB_TOKEN)"
     if "insufficient_quota" in lowered or "exceeded your current quota" in lowered:
-        return "OpenAI API quota exceeded (check billing)"
+        return "quota_exceeded", "OpenAI API quota exceeded (check billing)"
     if "timed out" in lowered or "timeout" in lowered:
-        return "Command timed out"
+        return "timeout", "Command timed out"
     if "cannot checkout commit" in lowered or "force-pushed or deleted" in lowered:
-        return "Git commit not found (may be force-pushed or deleted)"
+        return "git_error", "Git commit not found (may be force-pushed or deleted)"
     if "git checkout" in lowered:
-        return "Git checkout failed (repo cache may be corrupted)"
-    return (stderr or "Unknown error").replace("\n", " ")
+        return "git_error", "Git checkout failed (repo cache may be corrupted)"
+    
+    message = (stderr or "Unknown error").replace("\n", " ")
+    return "other", message
 
 
 def _print_success(
@@ -158,6 +175,7 @@ def _run_reversal_for_pr(
             message=error_msg,
             duration_seconds=round(time.time() - start, 2),
             timestamp=_now_utc().isoformat(),
+            category="other",
         )
 
 
@@ -180,6 +198,7 @@ def _run_reversal_for_pr_impl(
             message="Dry run (skipped actual execution)",
             duration_seconds=0.0,
             timestamp=_now_utc().isoformat(),
+            category=None,
         )
 
     # Build CreateConfig for run_reversal (universal pipeline)
@@ -205,6 +224,7 @@ def _run_reversal_for_pr_impl(
     # Capture any errors from the pipeline
     success = False
     error_msg = ""
+    error_category = None
 
     try:
         # Call the pipeline directly instead of using subprocess
@@ -213,24 +233,30 @@ def _run_reversal_for_pr_impl(
     except TrivialPRError as e:
         # Trivial PR - not an error, just skip it
         error_msg = str(e)
+        error_category = "trivial"
         success = False
     except MissingIssueError as e:
         # No linked issue - not an error, just skip it
         error_msg = str(e)
+        error_category = "no_issue"
         success = False
     except ValidationError as e:
         # Validation failed - not an error, just skip it
         error_msg = str(e)
+        error_category = "validation_failed"
         success = False
     except FileExistsError as e:
         # Task already exists - skip it
         error_msg = f"Task already exists: {str(e)}"
+        error_category = "already_exists"
         success = False
     except Exception as e:
         # Other errors
         error_msg = f"{type(e).__name__}: {str(e)}"
         if config.verbose:
             console.print(f"[red]{traceback.format_exc()}[/red]")
+        # Classify the error
+        error_category, _ = _classify_failure(error_msg)
         success = False
 
     if success:
@@ -238,10 +264,12 @@ def _run_reversal_for_pr_impl(
             # Check for trivial PR (should have been caught by TrivialPRError)
             if "trivial" in error_msg.lower():
                 failure_reason = "Trivial PR (skipped)"
+                failure_category = "trivial"
             else:
                 failure_reason = (
                     "Pipeline reported success but Harbor task directory was not created."
                 )
+                failure_category = "other"
             _cleanup_task(task_id, tasks_root, console)
             console.print(f"[red]✗ PR #{pr.number}: {failure_reason}[/red]")
             return TaskResult(
@@ -252,6 +280,7 @@ def _run_reversal_for_pr_impl(
                 message=failure_reason,
                 duration_seconds=round(time.time() - start, 2),
                 timestamp=_now_utc().isoformat(),
+                category=failure_category,
             )
 
         # Task is already in Harbor format (create now generates directly to Harbor)
@@ -279,10 +308,12 @@ def _run_reversal_for_pr_impl(
                 message=gate_msg,
                 duration_seconds=round(duration, 2),
                 timestamp=_now_utc().isoformat(),
+                category=None,
             )
 
         # Gate failed
         failure_reason = gate_msg
+        failure_category = "other"
         _cleanup_task(task_id, tasks_root, console)
         console.print(f"[red]✗ PR #{pr.number}: {failure_reason}[/red]")
         return TaskResult(
@@ -293,10 +324,11 @@ def _run_reversal_for_pr_impl(
             message=failure_reason,
             duration_seconds=round(duration, 2),
             timestamp=_now_utc().isoformat(),
+            category=failure_category,
         )
 
     # Pipeline failed
-    failure_reason = _classify_failure(error_msg)
+    failure_category, failure_reason = _classify_failure(error_msg)
     _cleanup_task(task_id, tasks_root, console)
     console.print(f"[red]✗ PR #{pr.number}: {failure_reason}[/red]")
     return TaskResult(
@@ -307,4 +339,5 @@ def _run_reversal_for_pr_impl(
         message=failure_reason,
         duration_seconds=round(time.time() - start, 2),
         timestamp=_now_utc().isoformat(),
+        category=failure_category,
     )

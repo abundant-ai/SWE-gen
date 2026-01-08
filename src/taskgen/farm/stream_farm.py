@@ -223,8 +223,15 @@ class StreamFarmer:
         result = _run_reversal_for_pr(pr, self.config, self.tasks_root, self.console)
         self.results.append(result)
 
-        # Mark as processed
-        self.state.mark_processed(pr.number, pr.created_at, result.status == "success")
+        # Mark as processed with detailed tracking
+        self.state.mark_processed(
+            pr.number, 
+            pr.created_at, 
+            result.status == "success",
+            task_id=result.task_id if result.status == "success" else None,
+            category=result.category,
+            message=result.message if result.category == "other" else None,
+        )
         self._save_state()
 
         # Show result
@@ -263,11 +270,24 @@ class StreamFarmer:
             created_dt = datetime.fromisoformat(self.state.last_created_at.replace("Z", "+00:00"))
             last_info = f"#{self.state.last_pr_number} (created {created_dt.strftime('%Y-%m-%d')})"
 
+        # Calculate top failure reasons
+        failure_summary = []
+        if len(self.state.trivial_prs) > 0:
+            failure_summary.append(f"Trivial: {len(self.state.trivial_prs)}")
+        if len(self.state.no_issue_prs) > 0:
+            failure_summary.append(f"No Issue: {len(self.state.no_issue_prs)}")
+        if len(self.state.validation_failed_prs) > 0:
+            failure_summary.append(f"Validation: {len(self.state.validation_failed_prs)}")
+        
+        failure_text = ", ".join(failure_summary[:3]) if failure_summary else "None"
+        success_rate = (self.state.successful / self.state.total_processed * 100) if self.state.total_processed > 0 else 0
+
         self.console.print(
             Panel(
                 f"Processed: {self.state.total_processed}\n"
-                f"✓ Success: {self.state.successful}\n"
+                f"✓ Success: {self.state.successful} ({success_rate:.1f}%)\n"
                 f"✗ Failed: {self.state.failed}\n"
+                f"Top failures: {failure_text}\n"
                 f"Last PR: {last_info}",
                 title="Progress",
                 border_style="cyan",
@@ -340,12 +360,39 @@ class StreamFarmer:
         table.add_row("PRs Processed", str(self.state.total_processed))
         table.add_row("Successful", f"[green]{self.state.successful}[/green]")
         table.add_row("Failed", f"[red]{self.state.failed}[/red]")
+        
+        # Add detailed breakdown
+        if self.state.failed > 0:
+            table.add_row("", "")  # Spacer
+            table.add_row("[bold]Failure Breakdown:[/bold]", "")
+            if self.state.trivial_prs:
+                table.add_row("  Trivial PRs", str(len(self.state.trivial_prs)))
+            if self.state.no_issue_prs:
+                table.add_row("  No Linked Issue", str(len(self.state.no_issue_prs)))
+            if self.state.no_tests_prs:
+                table.add_row("  No Tests", str(len(self.state.no_tests_prs)))
+            if self.state.validation_failed_prs:
+                table.add_row("  Validation Failed", str(len(self.state.validation_failed_prs)))
+            if self.state.already_exists_prs:
+                table.add_row("  Already Exists", str(len(self.state.already_exists_prs)))
+            if self.state.rate_limit_prs:
+                table.add_row("  Rate Limited", str(len(self.state.rate_limit_prs)))
+            if self.state.quota_exceeded_prs:
+                table.add_row("  Quota Exceeded", str(len(self.state.quota_exceeded_prs)))
+            if self.state.timeout_prs:
+                table.add_row("  Timeouts", str(len(self.state.timeout_prs)))
+            if self.state.git_error_prs:
+                table.add_row("  Git Errors", str(len(self.state.git_error_prs)))
+            if self.state.other_failed_prs:
+                table.add_row("  Other Errors", str(len(self.state.other_failed_prs)))
 
         self.console.print(table)
 
         if self.state.successful > 0:
+            success_rate = (self.state.successful / self.state.total_processed) * 100
             self.console.print(
-                f"\n[green]✓ Generated {self.state.successful} tasks successfully![/green]"
+                f"\n[green]✓ Generated {self.state.successful} tasks successfully! "
+                f"({success_rate:.1f}% success rate)[/green]"
             )
             self.console.print("[dim]Tasks located in: tasks/[/dim]")
 
