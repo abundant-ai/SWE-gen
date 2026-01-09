@@ -14,7 +14,7 @@ from .utils import strip_tests_prefix
 
 
 @dataclass
-class UniversalSkeletonParams:
+class SkeletonParams:
     """Parameters for skeleton generation (all deterministic from git)."""
 
     repo_url: str
@@ -22,7 +22,7 @@ class UniversalSkeletonParams:
     base_sha: str
 
 
-def generate_universal_dockerfile(params: UniversalSkeletonParams) -> str:
+def generate_dockerfile(params: SkeletonParams) -> str:
     """
     Generate a minimal, language-agnostic Dockerfile skeleton.
 
@@ -115,7 +115,7 @@ WORKDIR /app/src
 """
 
 
-def generate_universal_test_sh(
+def generate_test_sh(
     test_files: list[str],
 ) -> str:
     """
@@ -217,8 +217,8 @@ exit "$test_status"
 """
 
 
-def generate_universal_solve_sh() -> str:
-    """Generate solution/solve.sh script (same for all languages)."""
+def generate_solve_sh() -> str:
+    """Generate solution/solve.sh script (same for all tasks)."""
     return """#!/bin/bash
 
 set -euo pipefail

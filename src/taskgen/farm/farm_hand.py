@@ -201,7 +201,7 @@ def _run_reversal_for_pr_impl(
             category=None,
         )
 
-    # Build CreateConfig for run_reversal (universal pipeline)
+    # Build CreateConfig for run_reversal
     create_config = CreateConfig(
         repo=config.repo,
         pr=pr.number,
@@ -289,7 +289,7 @@ def _run_reversal_for_pr_impl(
         if gate_ok:
             _print_success(console, pr, task_id, harbor_dir)
 
-            # Save task reference for future PRs (universal pipeline)
+            # Save task reference for future PRs
             try:
                 reference_store = TaskReferenceStore()
                 reference_store.save(

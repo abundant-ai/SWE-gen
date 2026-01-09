@@ -11,7 +11,7 @@ from harbor.models.environment_type import EnvironmentType
 class CreateConfig:
     """Configuration for the create command (PR → Harbor task).
 
-    The create command uses a universal language-agnostic pipeline that works
+    The create command uses a language-agnostic pipeline that works
     for any repository. Claude Code analyzes the repo to detect language, runtime,
     build system, and test framework automatically.
 
@@ -64,7 +64,7 @@ class CreateConfig:
 class FarmConfig:
     """Configuration for the farm command (continuous PR processing).
 
-    The farm command uses a universal language-agnostic pipeline that works
+    The farm command uses a language-agnostic pipeline that works
     for any repository. Claude Code analyzes the repo to detect language, runtime,
     build system, and test framework automatically.
 

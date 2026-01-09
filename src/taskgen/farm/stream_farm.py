@@ -175,7 +175,7 @@ class StreamFarmer:
         """Print the farming header with settings."""
         self.console.print(Rule(Text(f"Stream Farming - {self.repo}", style="bold cyan")))
 
-        # Universal pipeline info
+        # pipeline info
         self.console.print("[green]Only PRs that modify tests will be considered.[/green]")
 
         if self.config.issue_only:

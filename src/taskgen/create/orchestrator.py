@@ -6,19 +6,19 @@ from pathlib import Path
 
 from harbor.models.task.paths import TaskPaths
 
-from .claude_code_runner import MakeItWorkResult, run_make_it_work_session
+from .claude_code_runner import ClaudeCodeResult, run_claude_code_session
 from .diff_utils import extract_test_files, generate_diffs
 from .pr_fetcher import GitHubPRFetcher
 from .repo_cache import RepoCache
 from .task_instruction import evaluate_and_generate_task
 from .task_reference import TaskReference, TaskReferenceStore
 from .task_skeleton import (
-    UniversalSkeletonParams,
+    SkeletonParams,
     generate_instruction_md,
     generate_task_toml,
-    generate_universal_dockerfile,
-    generate_universal_solve_sh,
-    generate_universal_test_sh,
+    generate_dockerfile,
+    generate_solve_sh,
+    generate_test_sh,
 )
 from .utils import check_multi_file_requirement, identify_test_files
 
@@ -81,7 +81,7 @@ class PRToHarborPipeline:
 
         return task_dir
 
-    def generate_task_universal(
+    def generate_task(
         self,
         tasks_root: Path,
         overwrite: bool = False,
@@ -98,9 +98,9 @@ class PRToHarborPipeline:
         min_source_files: int = 3,
         max_source_files: int = 10,
         environment: str = "docker",
-    ) -> tuple[Path, MakeItWorkResult | None, list[str], TaskReference | None]:
+    ) -> tuple[Path, ClaudeCodeResult | None, list[str], TaskReference | None]:
         """
-        Generate a Harbor task for ANY language using a universal skeleton + Claude Code.
+        Generate a Harbor task using skeleton + Claude Code.
 
         This is the language-agnostic pipeline that works for any repository.
         Claude Code analyzes the repo to detect language, runtime, build system,
@@ -108,7 +108,7 @@ class PRToHarborPipeline:
 
         Flow:
         1. Clone/update repo to local cache
-        2. Generate universal skeleton (language-agnostic Dockerfile, test.sh)
+        2. Generate skeleton (language-agnostic Dockerfile, test.sh)
         3. Run Claude Code to detect language and fill in skeleton
         4. Validate with Harbor NOP/Oracle agents
 
@@ -135,7 +135,7 @@ class PRToHarborPipeline:
         """
         logger = logging.getLogger("taskgen")
         logger.info("=" * 60)
-        logger.info("Universal Task Generation (Any Language)")
+        logger.info("Task Generation")
         logger.info("Repo: %s, PR: #%d", self.repo, self.pr_number)
         logger.info("=" * 60)
 
@@ -283,11 +283,11 @@ class PRToHarborPipeline:
                     shutil.rmtree(task_dir)
                 raise
 
-            # Step 10: Write universal skeleton files
-            logger.info("Writing universal skeleton task files...")
+            # Step 10: Write skeleton files
+            logger.info("Writing skeleton task files...")
 
             # Create skeleton params
-            skeleton_params = UniversalSkeletonParams(
+            skeleton_params = SkeletonParams(
                 repo_url=metadata["repo_url"],
                 head_sha=metadata["head_sha"],
                 base_sha=metadata["base_sha"],
@@ -296,12 +296,12 @@ class PRToHarborPipeline:
             # bug.patch
             (paths.environment_dir / "bug.patch").write_text(bug_diff)
 
-            # Universal Dockerfile (with TODOs for CC)
-            dockerfile = generate_universal_dockerfile(skeleton_params)
+            # Dockerfile (with TODOs for CC)
+            dockerfile = generate_dockerfile(skeleton_params)
             (paths.environment_dir / "Dockerfile").write_text(dockerfile)
 
-            # Universal test.sh (with TODOs for CC)
-            test_sh_content = generate_universal_test_sh(extracted_test_files)
+            # test.sh (with TODOs for CC)
+            test_sh_content = generate_test_sh(extracted_test_files)
             paths.test_path.write_text(test_sh_content)
             paths.test_path.chmod(0o755)
 
@@ -313,10 +313,10 @@ class PRToHarborPipeline:
             (paths.solution_dir / "fix.patch").write_text(solution_diff)
 
             # solution/solve.sh - applies fix.patch (same for all languages)
-            paths.solve_path.write_text(generate_universal_solve_sh())
+            paths.solve_path.write_text(generate_solve_sh())
             paths.solve_path.chmod(0o755)
 
-            logger.info("Universal skeleton generated: %s", task_dir)
+            logger.info("Skeleton generated: %s", task_dir)
 
             # Step 11: Run CC to complete skeleton and make harbor pass
             cc_result = None
@@ -328,10 +328,10 @@ class PRToHarborPipeline:
                     )
                 else:
                     logger.info(
-                        "Running CC 'make it work' session (will detect language automatically)..."
+                        "Running CC session (will detect language automatically)..."
                     )
 
-                cc_result = run_make_it_work_session(
+                cc_result = run_claude_code_session(
                     repo=self.repo,
                     pr_number=self.pr_number,
                     repo_path=repo_path,

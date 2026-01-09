@@ -568,7 +568,7 @@ def farm(
     """
     Continuously process merged GitHub PRs and convert them to Harbor tasks.
     Streams PRs page-by-page, processes them immediately, and maintains state for resumable operation.
-    Uses a universal language-agnostic pipeline that works for any repository.
+    Uses a language-agnostic pipeline that works for any repository.
     """
     config = FarmConfig(
         repo=repo,

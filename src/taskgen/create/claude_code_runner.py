@@ -19,8 +19,8 @@ from taskgen.tools.harbor_runner import parse_harbor_outcome
 
 
 @dataclass
-class MakeItWorkResult:
-    """Result of the CC 'make it work' session."""
+class ClaudeCodeResult:
+    """Result of the CC session."""
 
     success: bool
     nop_passed: bool  # reward=0 (tests fail on buggy code)
@@ -198,7 +198,7 @@ You're done when both NOP (reward=0) and Oracle (reward=1) pass AND files are cl
 """
 
 # The prompt for CC to analyze repo and fill in skeleton (from scratch)
-CC_MAKE_IT_WORK_PROMPT = """
+CC_PROMPT = """
 ## Your Task: Make This Harbor Task Work
 
 You have a skeleton Harbor task that needs to be completed. Your job is to:
@@ -706,7 +706,7 @@ Inside each job directory:
 """
 
 
-def run_make_it_work_session(
+def run_claude_code_session(
     repo: str,
     pr_number: int,
     repo_path: Path,
@@ -720,7 +720,7 @@ def run_make_it_work_session(
     reference_pr: int | None = None,
     head_sha: str | None = None,
     environment: str = "docker",
-) -> MakeItWorkResult:
+) -> ClaudeCodeResult:
     """
     Run Claude Code session to complete skeleton and make harbor pass.
 
@@ -744,7 +744,7 @@ def run_make_it_work_session(
     """
     # Run async session in sync context
     return asyncio.run(
-        _run_make_it_work_session_async(
+        _run_claude_code_session_async(
             repo=repo,
             pr_number=pr_number,
             repo_path=repo_path,
@@ -762,7 +762,7 @@ def run_make_it_work_session(
     )
 
 
-async def _run_make_it_work_session_async(
+async def _run_claude_code_session_async(
     repo: str,
     pr_number: int,
     repo_path: Path,
@@ -776,7 +776,7 @@ async def _run_make_it_work_session_async(
     reference_pr: int | None = None,
     head_sha: str | None = None,
     environment: str = "docker",
-) -> MakeItWorkResult:
+) -> ClaudeCodeResult:
     """Async implementation of Claude Code session."""
     logger = logging.getLogger("taskgen")
     logger.info("Starting Claude Code session for: %s", task_id)
@@ -819,7 +819,7 @@ async def _run_make_it_work_session_async(
             f"Using reference prompt (copying from {reference_task_id}, PR #{reference_pr})"
         )
     else:
-        prompt_text = CC_MAKE_IT_WORK_PROMPT.format(
+        prompt_text = CC_PROMPT.format(
             repo=repo,
             pr_number=pr_number,
             repo_path=repo_path,
@@ -904,7 +904,7 @@ async def _run_make_it_work_session_async(
 
     except Exception as e:
         logger.error("Claude Code session failed: %s", e)
-        return MakeItWorkResult(
+        return ClaudeCodeResult(
             success=False,
             nop_passed=False,
             oracle_passed=False,
@@ -917,7 +917,7 @@ def _check_validation_state(
     task_id: str,
     logger: logging.Logger,
     timed_out: bool = False,
-) -> MakeItWorkResult:
+) -> ClaudeCodeResult:
     """Check validation state from harbor job results."""
     nop_passed, oracle_passed = _check_job_results(jobs_dir, task_id)
     success = nop_passed and oracle_passed
@@ -933,7 +933,7 @@ def _check_validation_state(
             parts.append("Oracle failed (expected reward=1)")
         error_message = "; ".join(parts) if parts else None
 
-    return MakeItWorkResult(
+    return ClaudeCodeResult(
         success=success,
         nop_passed=nop_passed,
         oracle_passed=oracle_passed,

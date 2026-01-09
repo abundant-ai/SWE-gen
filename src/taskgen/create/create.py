@@ -22,7 +22,7 @@ from taskgen.tools.network_isolation import network_isolation
 from taskgen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
-from .claude_code_runner import MakeItWorkResult, run_make_it_work_session
+from .claude_code_runner import ClaudeCodeResult, run_claude_code_session
 from .repo_cache import RepoCache
 
 # -----------------------------------------------------------------------------
@@ -447,12 +447,11 @@ def run_reversal(config: CreateConfig) -> None:
         harbor_root.mkdir(parents=True, exist_ok=True)
         t0 = time.perf_counter()
 
-        # Universal flow: Works for any language
         # CC detects language automatically and fills in the skeleton
-        cc_result: MakeItWorkResult | None = None
+        cc_result: ClaudeCodeResult | None = None
 
         try:
-            # Universal flow: skeleton generation + CC (any language)
+            # try: skeleton generation + CC
             verbose = config.verbose
 
             # Step 1a: Fetch PR metadata
@@ -472,7 +471,7 @@ def run_reversal(config: CreateConfig) -> None:
             )
             console.print(f"[dim]    Repo at: {repo_path}[/dim]")
 
-            # Step 1c: Generate universal skeleton files (includes LLM call for PR evaluation)
+            # Step 1c: Generate skeleton files (includes LLM call for PR evaluation)
             console.print("[dim]  → Generating skeleton and evaluating...[/dim]")
             with console.status("Evaluating PR & writing skeleton...", spinner="dots"):
                 (
@@ -480,7 +479,7 @@ def run_reversal(config: CreateConfig) -> None:
                     _,
                     extracted_test_files,
                     task_reference,
-                ) = pipeline.generate_task_universal(
+                ) = pipeline.generate_task(
                     tasks_root=harbor_root,
                     overwrite=bool(config.force),
                     cache_dir=repo_cache_dir,
@@ -525,7 +524,7 @@ def run_reversal(config: CreateConfig) -> None:
                 )
             console.print()
 
-            cc_result = run_make_it_work_session(
+            cc_result = run_claude_code_session(
                 repo=pipeline.repo,
                 pr_number=pipeline.pr_number,
                 repo_path=repo_path,
