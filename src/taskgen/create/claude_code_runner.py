@@ -860,6 +860,7 @@ async def _run_make_it_work_session_async(
             allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "LS", "Bash"],
             permission_mode="bypassPermissions",  # Auto-approve actions
             cwd=os.getcwd(),  # Run from project root
+            model="sonnet",  # Use Sonnet model
             hooks={
                 "PreToolUse": [HookMatcher(matcher="Bash", hooks=[log_harbor_runs])]
             } if verbose else {},

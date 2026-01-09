@@ -10,12 +10,15 @@ from .utils import CombinedPRTaskEvaluation
 MAX_LINKED_ISSUES = 5
 MAX_ISSUE_BODY_LENGTH = 2500
 MAX_PR_BODY_LENGTH = 2500
+MAX_TEST_FILE_LENGTH = 3000  # Max chars per test file
+MAX_TOTAL_TEST_LENGTH = 10000  # Max total chars for all test files
 MIN_INSTRUCTION_LENGTH = 100
 OPENAI_API_TIMEOUT = 90.0
 MAX_COMPLETION_TOKENS = 4096
+MODEL_NAME = "gpt-5.2"
 DEBUG_REASON_TRUNCATE_LENGTH = 100
 
-COMBINED_SYSTEM_PROMPT = """You are evaluating GitHub pull requests and converting substantial ones into Harbor tasks.
+COMBINED_SYSTEM_PROMPT = """You are evaluating GitHub pull requests and converting substantial ones into SWE-bench tasks.
 
 Your job has TWO PHASES:
 
@@ -49,28 +52,48 @@ The PR MUST modify multiple files (at least 2-3 meaningful source code files, no
 Single-file changes are almost never substantial enough unless they involve major refactoring or complex logic.
 
 PHASE 2 - Generate Task (ONLY if substantial):
-If is_substantial=true, write a CONCISE bug report.
+If is_substantial=true, write a DETAILED bug report that an engineer can solve.
 
-SOURCE PRIORITY (CRITICAL - follow this order strictly):
-1. If linked issues exist, extract the bug description DIRECTLY from the issue content
-2. Otherwise, infer the bug from PR title/description
+SOURCE PRIORITY:
+1. Linked issues (if available) - for the problem description
+2. PR title and body - for context and details
+3. Test files - for expected behavior and API specifications
 
 CRITICAL INSTRUCTIONS:
-- Write about the ACTUAL bug from the PR/issue you're evaluating
-- If a linked issue exists, base your description on that issue's actual content
+- Write a clear description of the PROBLEM that needs to be solved
+- Include specific function/class/method names IF they appear in tests or issues
+- Include exact error messages that users see or that tests expect
+- Include expected behavior vs actual behavior
+- If tests show specific API calls, mention them (e.g., "implement validate_email() method")
+
+WHAT TO INCLUDE:
+✓ Problem description from issue/PR
+✓ Expected behavior vs actual behavior
+✓ Error messages users see
+✓ Function/method/class names that tests call or issue mentions
+✓ Expected return values or outputs
+✓ Code examples showing the bug (if in issue/PR)
+
+WHAT TO EXCLUDE:
+✗ File paths or module locations (e.g., "fix in utils/validators.py")
+✗ Implementation approaches (e.g., "use a try-catch", "add caching")
+✗ How the PR fixed it (e.g., "I changed X to Y")
+✗ Internal implementation details not visible in tests/issue
 
 FORMAT RULES:
-- Be concise - state what's broken, how to trigger it, expected behavior
-- Include a brief code snippet if it helps show the bug
+- Be clear and specific enough that an engineer knows what to implement
+- Include code snippets from issues/tests if they clarify the expected behavior
 - DO NOT use sections like "Impact:", "Acceptance criteria:", "Notes:", "Additional considerations:"
-- DO NOT write long bullet-point lists
-- DO NOT pad with verbose explanations
+- Write naturally, as if explaining to a colleague
 
-CONTENT RULES:
-- DO NOT mention file paths or function names (unless from the issue)
-- DO NOT leak implementation details or where to fix
-- Focus on the USER-VISIBLE problem, not internals
-- Extract the problem description FROM THE PROVIDED PR/ISSUE DATA
+EXAMPLE GOOD INSTRUCTION:
+"The email validation is failing for valid email addresses. When calling user.validate_email('test@example.com'), 
+it should return True, but currently returns False for addresses with subdomains. The validation should accept 
+any email matching the pattern <local>@<domain>.<tld> including subdomains like test@mail.example.com."
+
+EXAMPLE BAD INSTRUCTION:
+"Fix the email validator in utils/auth.py by changing the regex pattern to support subdomains using a more 
+permissive regex."
 
 TAGS:
 Generate exactly 3 tags in this order:
@@ -96,6 +119,7 @@ def _format_user_prompt(
     changed_files: list[str],
     linked_issues: list[dict] | None = None,
     force_generate_instruction: bool = False,
+    test_contents: dict[str, str] | None = None,
 ) -> str:
     """Format user prompt for combined evaluation + task generation.
 
@@ -117,20 +141,45 @@ def _format_user_prompt(
             "\nIMPORTANT: Generate a detailed instruction for this PR regardless of complexity.\n"
             "You should ALWAYS set is_substantial=true and write a comprehensive bug report/task instruction.\n"
             "Even if the PR seems simple, treat it as a valid task and describe the problem that was fixed.\n"
-            "Focus on writing a clear, detailed bug report with specifics about the issue that was resolved.\n"
-            "DO NOT mention specific file paths or function names unless they appear in the issue."
+            "Include specific function/method/class names that appear in the tests or issue.\n"
+            "Focus on what needs to be implemented, not where or how to implement it."
         )
     else:
         ending_instruction = (
             "\nFirst, evaluate if this PR is substantial enough to generate a task.\n"
             "Remember: PRs with changes to only 1-2 files are usually too trivial unless they involve major complexity.\n"
             "Look for changes across multiple source files that demonstrate real cross-component coordination.\n"
-            "If substantial, write a detailed bug report describing the PROBLEM (not the solution).\n"
-            "DO NOT mention specific file paths or function names unless they appear in the issue.\n"
+            "If substantial, write a detailed bug report describing the PROBLEM and what needs to be implemented.\n"
+            "Include specific function/method/class names from tests or issues, but NOT file paths or implementation details.\n"
             "If not substantial, explain why briefly and set instruction to null."
         )
 
-    # MODE 1: Linked issues exist - use ONLY issue content (preferred)
+    # Build test contents section if provided
+    test_section = ""
+    if test_contents and len(test_contents) > 0:
+        test_lines = ["Test Files (showing expected behavior):"]
+        total_length = 0
+        
+        # Sort by file size (smaller first) to prioritize including more files
+        sorted_tests = sorted(test_contents.items(), key=lambda x: len(x[1]))
+        
+        for test_file, content in sorted_tests:
+            # Truncate individual file if too long
+            if len(content) > MAX_TEST_FILE_LENGTH:
+                content = content[:MAX_TEST_FILE_LENGTH] + "\n... (truncated)"
+            
+            # Check if adding this file would exceed total limit
+            if total_length + len(content) > MAX_TOTAL_TEST_LENGTH:
+                test_lines.append(f"\n... ({len(test_contents) - len(test_lines) + 1} more test files omitted)")
+                break
+            
+            test_lines.append(f"\n--- {test_file} ---")
+            test_lines.append(content)
+            total_length += len(content)
+        
+        test_section = "\n".join(test_lines) + "\n\n"
+
+    # MODE 1: Linked issues exist - use issue + PR body + tests
     if linked_issues and len(linked_issues) > 0:
         # Sort by body length (longer = more detail = more useful), take top N
         sorted_issues = sorted(
@@ -152,15 +201,26 @@ def _format_user_prompt(
 
         issues_section = "\n".join(issue_lines)
 
+        # Include PR body for additional context
+        pr_body_truncated = (pr_body or "").strip()
+        if len(pr_body_truncated) > MAX_PR_BODY_LENGTH:
+            pr_body_truncated = pr_body_truncated[:MAX_PR_BODY_LENGTH] + "\n...(truncated)"
+        
+        pr_body_section = ""
+        if pr_body_truncated:
+            pr_body_section = f"PR Description (for additional context):\n{pr_body_truncated}\n\n"
+
         return (
             f"Repository: {repo}\n"
             f"PR Title: {pr_title}\n\n"
-            f"Linked Issue(s) - USE THESE AS THE PRIMARY SOURCE:\n{issues_section}\n\n"
-            f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n"
+            f"Linked Issue(s):\n{issues_section}\n\n"
+            + pr_body_section
+            + test_section
+            + f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n"
             + ending_instruction
         )
 
-    # MODE 2: No linked issue - use PR title + body, but warn LLM about solution leakage
+    # MODE 2: No linked issue - use PR title + body + tests
     pr_body_truncated = (pr_body or "").strip()
     if len(pr_body_truncated) > MAX_PR_BODY_LENGTH:
         pr_body_truncated = pr_body_truncated[:MAX_PR_BODY_LENGTH] + "\n...(truncated)"
@@ -169,13 +229,8 @@ def _format_user_prompt(
         f"Repository: {repo}\n"
         f"PR Title: {pr_title}\n\n"
         + (f"PR Description:\n{pr_body_truncated}\n\n" if pr_body_truncated else "")
+        + test_section
         + f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n\n"
-        "WARNING: No linked issue found. The PR description may contain solution details.\n"
-        "Extract ONLY the problem description. Ignore any mentions of:\n"
-        "- What was changed/fixed/updated\n"
-        "- Which files or functions were modified\n"
-        "- Implementation approach or code changes\n"
-        "Describe the PROBLEM that users would experience, not how it was fixed.\n"
         + ending_instruction
     )
 
@@ -184,10 +239,11 @@ def evaluate_and_generate_task(
     metadata: dict,
     files: list[dict],
     repo: str,
-    model: str = "gpt-5-mini",
+    model: str = MODEL_NAME,
     api_key: str | None = None,
     linked_issues: list[dict] | None = None,
     force_generate_instruction: bool = False,
+    test_contents: dict[str, str] | None = None,
 ) -> CombinedPRTaskEvaluation:
     """Evaluate PR substantiality and generate task description in one LLM call.
 
@@ -201,6 +257,7 @@ def evaluate_and_generate_task(
         api_key: Optional OpenAI API key
         linked_issues: Optional list of linked issue dicts (with 'title', 'body', 'number')
         force_generate_instruction: If True, always generate an instruction even if PR seems trivial
+        test_contents: Optional dict mapping test file paths to their contents
 
     Returns:
         CombinedPRTaskEvaluation with evaluation and task details
@@ -227,6 +284,7 @@ def evaluate_and_generate_task(
         changed_files,
         linked_issues=linked_issues,
         force_generate_instruction=force_generate_instruction,
+        test_contents=test_contents,
     )
 
     client = OpenAI(

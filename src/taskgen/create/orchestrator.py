@@ -90,7 +90,7 @@ class PRToHarborPipeline:
         metadata: dict | None = None,
         linked_issues: list | None = None,
         run_cc: bool = True,
-        cc_timeout: int = 900,
+        cc_timeout: int = 3200,
         verbose: bool = True,
         use_cache: bool = True,
         state_dir: Path | None = None,
@@ -230,6 +230,21 @@ class PRToHarborPipeline:
                 output_dir=task_dir,
             )
 
+            # Step 8b: Read test file contents for instruction generation
+            test_contents = {}
+            test_dir = task_dir / "tests"
+            if test_dir.exists():
+                for test_file in test_dir.rglob("*"):
+                    if test_file.is_file():
+                        try:
+                            # Read as text, skip binary files
+                            content = test_file.read_text(encoding='utf-8', errors='ignore')
+                            # Store with relative path from tests/ dir
+                            rel_path = test_file.relative_to(test_dir)
+                            test_contents[str(rel_path)] = content
+                        except Exception as e:
+                            logger.debug(f"Could not read test file {test_file}: {e}")
+
             # Step 9: Generate evaluation + instruction (uses LLM but not CC)
             logger.info("Evaluating PR and generating instruction...")
             try:
@@ -239,6 +254,7 @@ class PRToHarborPipeline:
                     self.repo,
                     linked_issues=linked_issues,
                     force_generate_instruction=(not require_minimum_difficulty),
+                    test_contents=test_contents,
                 )
 
                 if not combined_result.is_substantial:
