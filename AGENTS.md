@@ -52,7 +52,6 @@ taskgen create --repo <owner/repo> --pr <number>
 Key options:
 - `--cc-timeout`: Timeout for Claude Code session in seconds (default: 3200)
 - `--no-validate`: Skip Harbor validation
-- `--network-isolated`: Also run network-isolated validation
 - `--no-require-issue`: Allow PRs without linked issues
 - `--no-require-minimum-difficulty`: Skip 3+ file requirement
 - `--no-cache`: Disable reusing cached artifacts from previous tasks
@@ -149,8 +148,7 @@ src/taskgen/
 └── tools/                  # Utility tools
     ├── validate.py         # Harbor NOP/Oracle validation
     ├── harbor_runner.py    # Harbor CLI wrapper
-    ├── validation.py       # Validation helpers
-    ├── network_isolation.py    # Network-isolated testing
+    ├── validate_utils.py   # Validation helpers
     └── clean.py            # Artifact cleanup
 ```
 

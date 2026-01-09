@@ -70,7 +70,6 @@ taskgen create --repo <owner/repo> --pr <num>
 - `--cc-timeout N` — Claude Code session timeout in seconds (default: 3200)
 - `--env, -e TYPE` — Environment type: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `gke` (default: `docker`)
 - `--no-validate` — Skip Harbor validations
-- `--network-isolated` — Also run network-isolated validation
 - `--force` — Bypass local dedupe and regenerate
 - `--no-cache` — Disable cached artifacts from previous tasks
 - `--no-require-minimum-difficulty` — Skip 3+ file and LLM substantiality checks
@@ -108,7 +107,6 @@ taskgen farm fastapi/fastapi --reset
 - `--dry-run` — Preview without generation
 - `--force` — Regenerate even if task already exists (default: true)
 - `--no-validate` — Skip Harbor validation step
-- `--network-isolated` — Also run network-isolated validation
 - `--issue-only` — Only process PRs with linked issues (default: True)
 - `--no-require-minimum-difficulty` — Skip 3+ file and LLM checks
 - `--min-source-files N` — Minimum number of source files required (default: 3, tests excluded)
@@ -135,7 +133,6 @@ taskgen validate tasks/<task_id>
 - `--agent TYPE` — `both`, `nop`, or `oracle` (default: `both`)
 - `--jobs-dir PATH` — Directory to store Harbor job artifacts (default: `.state/harbor-jobs`)
 - `--env, -e TYPE` — Environment type: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `gke` (default: `docker`)
-- `--network-isolated` — Also run network-isolated validation
 - `--timeout-multiplier N` — Multiply default timeouts
 - `--max-parallel N` — Max parallel validations (default: 8)
 - `--show-passed` — Show passed tasks in batch mode
