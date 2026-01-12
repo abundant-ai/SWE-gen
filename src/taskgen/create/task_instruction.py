@@ -66,6 +66,19 @@ CRITICAL INSTRUCTIONS:
 - Include expected behavior vs actual behavior
 - If tests show specific API calls, mention them (e.g., "implement validate_email() method")
 
+IMPORTANT - ABOUT TEST FILES:
+You may see test file contents to help you understand what needs to be implemented. However:
+✗ DO NOT mention the test files themselves (e.g., "from the test sample", "the test fixture", "the provided test")
+✗ DO NOT reference test file names or paths
+✗ DO NOT say things like "the test shows" or "according to the tests"
+
+Instead, write as if describing the problem from a user/issue perspective:
+✓ "When calling foo() with X, it should return Y but currently returns Z"
+✓ "The function should handle these cases: ..."
+✓ "Expected behavior: ... Actual behavior: ..."
+
+The agent solving this task will NOT see the test files, so any reference to them will be confusing.
+
 WHAT TO INCLUDE:
 ✓ Problem description from issue/PR
 ✓ Expected behavior vs actual behavior
@@ -73,9 +86,12 @@ WHAT TO INCLUDE:
 ✓ Function/method/class names that tests call or issue mentions
 ✓ Expected return values or outputs
 ✓ Code examples showing the bug (if in issue/PR)
+✓ Specific scenarios/cases that should work (derived from tests, but written as requirements)
 
 WHAT TO EXCLUDE:
 ✗ File paths or module locations (e.g., "fix in utils/validators.py")
+✗ Test file names, paths, or references (e.g., "test_foo.py", "the test fixture")
+✗ Phrases like "from the test", "the test shows", "according to the tests"
 ✗ Implementation approaches (e.g., "use a try-catch", "add caching")
 ✗ How the PR fixed it (e.g., "I changed X to Y")
 ✗ Internal implementation details not visible in tests/issue
@@ -142,7 +158,8 @@ def _format_user_prompt(
             "You should ALWAYS set is_substantial=true and write a comprehensive bug report/task instruction.\n"
             "Even if the PR seems simple, treat it as a valid task and describe the problem that was fixed.\n"
             "Include specific function/method/class names that appear in the tests or issue.\n"
-            "Focus on what needs to be implemented, not where or how to implement it."
+            "Focus on what needs to be implemented, not where or how to implement it.\n"
+            "REMEMBER: Do NOT mention test files - the agent won't see them. Write from a user/issue perspective."
         )
     else:
         ending_instruction = (
@@ -151,13 +168,16 @@ def _format_user_prompt(
             "Look for changes across multiple source files that demonstrate real cross-component coordination.\n"
             "If substantial, write a detailed bug report describing the PROBLEM and what needs to be implemented.\n"
             "Include specific function/method/class names from tests or issues, but NOT file paths or implementation details.\n"
+            "REMEMBER: Do NOT mention test files - the agent won't see them. Write from a user/issue perspective.\n"
             "If not substantial, explain why briefly and set instruction to null."
         )
 
     # Build test contents section if provided
+    # NOTE: Tests help the LLM understand expected behavior, but it should NOT
+    # mention test files in the instruction since the agent won't see them
     test_section = ""
     if test_contents and len(test_contents) > 0:
-        test_lines = ["Test Files (showing expected behavior):"]
+        test_lines = ["Test Files (for understanding behavior - do NOT reference these in your instruction):"]
         total_length = 0
         
         # Sort by file size (smaller first) to prioritize including more files
