@@ -97,19 +97,21 @@ taskgen analyze task tasks/<task_id> -k 5 --save-to-dir
 Key options:
 - `-k, --n-trials`: Number of trials to run (default: 3)
 - `-n, --n-concurrent`: Number of concurrent trials (default: 3)
-- `--analysis-model`: Model for Claude Code classification (default: claude-sonnet-4-20250514)
+- `--analysis-model`: Model for Claude Code classification (default: claude-sonnet-4-5)
 - `--save-to-dir`: Write trajectory-analysis.{md,json} to each trial directory
 - `--skip-baseline`: Skip baseline validation (nop/oracle)
 - `--skip-classify`: Skip AI-powered trial classification
 
-#### `taskgen analyze trial`
-Classify a single completed trial (trajectory analysis).
+**Note**: For programmatic access to classification and verdict synthesis (e.g., CI integration), use the library directly:
 
-```bash
-taskgen analyze trial <trial_dir> --task-dir <task_dir> --agent claude-code --model anthropic/claude-sonnet-4-20250514
+```python
+from taskgen.analyze import TrialClassifier, compute_task_verdict, write_trial_analysis_files
+
+# Classify a single trial
+classifier = TrialClassifier(model="claude-sonnet-4-5")
+classification = await classifier.classify_trial(trial_dir, task_dir)
+write_trial_analysis_files(trial_dir, classification, task_id, agent, model)
 ```
-
-This command analyzes an existing trial's trajectory without running new trials. Useful for CI integration.
 
 ### `taskgen clean`
 Remove local artifacts (.state, logs, jobs).

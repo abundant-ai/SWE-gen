@@ -221,7 +221,7 @@ def analyze_task(
         "claude-code", "-a", "--agent", help="Agent to run trials with", show_default=True
     ),
     model: str = typer.Option(
-        "anthropic/claude-sonnet-4-20250514",
+        "anthropic/claude-sonnet-4-5",
         "-m",
         "--model",
         help="Model to use for agent trials",
@@ -249,7 +249,7 @@ def analyze_task(
         False, "--skip-classify", help="Skip LLM classification of trial outcomes"
     ),
     analysis_model: str = typer.Option(
-        "claude-sonnet-4-20250514",
+        "claude-sonnet-4-5",
         "--analysis-model",
         help="Model for Claude Code classification",
         show_default=True,
@@ -332,154 +332,6 @@ def analyze_task(
             save_to_dir=save_to_dir,
         )
     )
-
-
-@analyze_app.command(name="trial", help="Classify a single completed trial (trajectory analysis)")
-def analyze_trial(
-    trial_dir: Path = typer.Argument(..., help="Path to the trial directory (contains result.json, agent/, verifier/)"),
-    task_dir: Path = typer.Option(
-        ...,
-        "--task-dir", "-t",
-        help="Path to the task directory (contains instruction.md, solution/, tests/)",
-    ),
-    agent: str = typer.Option(
-        "unknown",
-        "-a", "--agent",
-        help="Agent name (for output metadata)",
-        show_default=True,
-    ),
-    model: str = typer.Option(
-        "unknown",
-        "-m", "--model",
-        help="Model name (for output metadata)",
-        show_default=True,
-    ),
-    task_id: str = typer.Option(
-        None,
-        "--task-id",
-        help="Task ID (defaults to task directory name)",
-    ),
-    analysis_model: str = typer.Option(
-        "claude-sonnet-4-20250514",
-        "--analysis-model",
-        help="Model for Claude Code classification",
-        show_default=True,
-    ),
-    timeout: int = typer.Option(
-        300,
-        "--timeout",
-        help="Timeout for classification in seconds",
-        show_default=True,
-    ),
-    verbose: bool = typer.Option(False, "-v", "--verbose", help="Stream Claude Code output"),
-    quiet: bool = typer.Option(False, "-q", "--quiet", help="Only output JSON result"),
-) -> None:
-    """
-    Classify a single completed trial's trajectory.
-
-    This is a lightweight command for classifying an existing trial without running
-    new trials. It analyzes the agent's trajectory and test results to determine:
-
-    - GOOD_SUCCESS: Agent solved it correctly
-    - BAD_SUCCESS: Agent cheated or tests too permissive  
-    - GOOD_FAILURE: Agent failed due to its own limitations (task is fine)
-    - BAD_FAILURE: Agent failed due to task issues (task needs fixing)
-    - HARNESS_ERROR: Infrastructure problem
-
-    Output files are written to the trial directory:
-    - trajectory-analysis.json: Structured classification result
-    - trajectory-analysis.md: Human-readable report
-    - trajectory-analysis-raw.json: Raw classification data
-
-    This command is designed for CI integration (e.g., task-workflows) where
-    Harbor has already run the trial and you just need to classify the result.
-
-    Examples:
-        # Classify a trial in a Harbor job directory
-        taskgen analyze trial .state/jobs/task-123/trial-0 \\
-            --task-dir tasks/owner__repo-123 \\
-            --agent claude-code \\
-            --model anthropic/claude-sonnet-4-20250514
-
-        # Quiet mode - just output JSON to stdout
-        taskgen analyze trial trial_dir -t task_dir -q
-    """
-    console = Console()
-    
-    # Validate paths
-    trial_path = trial_dir.resolve()
-    task_path = task_dir.resolve()
-    
-    if not trial_path.is_dir():
-        console.print(f"[red]Error: Trial directory does not exist: {trial_path}[/red]")
-        raise typer.Exit(1)
-    
-    if not task_path.is_dir():
-        console.print(f"[red]Error: Task directory does not exist: {task_path}[/red]")
-        raise typer.Exit(1)
-    
-    # Default task_id to directory name
-    if task_id is None:
-        task_id = task_path.name
-    
-    if not quiet:
-        console.print(f"[bold]Classifying trial:[/bold] {trial_path.name}")
-        console.print(f"  Task: {task_id}")
-        console.print(f"  Agent: {agent}")
-        console.print(f"  Model: {model}")
-    
-    # Run classification
-    classifier = TrialClassifier(
-        model=analysis_model,
-        verbose=verbose,
-        timeout=timeout,
-    )
-    
-    classification = classifier.classify_trial_sync(trial_path, task_path)
-    
-    # Write output files
-    write_trial_analysis_files(
-        trial_dir=trial_path,
-        classification=classification,
-        task_id=task_id,
-        agent=agent,
-        model=model,
-    )
-    
-    # Output result
-    if quiet:
-        # JSON-only output for piping
-        result = {
-            "task_id": task_id,
-            "agent": agent,
-            "model": model,
-            "classification": classification.classification.value,
-            "subtype": classification.subtype,
-            "evidence": classification.evidence,
-            "root_cause": classification.root_cause,
-            "recommendation": classification.recommendation,
-        }
-        print(json.dumps(result))
-    else:
-        # Human-readable output
-        classification_str = classification.classification.value
-        if classification.classification.is_task_problem:
-            style = "yellow"
-            icon = "⚠️"
-        elif classification.classification.is_success:
-            style = "green"
-            icon = "✅"
-        else:
-            style = "dim"
-            icon = "⚪"
-        
-        console.print(f"\n[{style}]{icon} {classification_str} - {classification.subtype}[/{style}]")
-        console.print(f"  [dim]Evidence:[/dim] {classification.evidence}")
-        console.print(f"  [dim]Root cause:[/dim] {classification.root_cause}")
-        if classification.is_task_problem:
-            console.print(f"  [yellow]Recommendation:[/yellow] {classification.recommendation}")
-        
-        console.print(f"\n[dim]Output written to {trial_path}/trajectory-analysis.*[/dim]")
 
 
 app.add_typer(analyze_app, name="analyze")

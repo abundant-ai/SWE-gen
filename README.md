@@ -52,8 +52,7 @@ export ANTHROPIC_API_KEY=<api-key>  # or CLAUDE_CODE_OAUTH_TOKEN
 - `taskgen create` — Generate task from a merged PR (validates by default)
 - `taskgen farm` — Continuously process PRs from a repository
 - `taskgen validate` — Validate existing Harbor task (NOP + Oracle)
-- `taskgen analyze task` — Deep analysis with agent trials to verify task quality
-- `taskgen analyze trial` — Classify a single completed trial (trajectory analysis)
+- `taskgen analyze` — Deep analysis with agent trials to verify task quality
 - `taskgen clean` — Remove .state artifacts
 
 ### Generate a Task
@@ -150,12 +149,6 @@ taskgen analyze task tasks/<task_id>
 taskgen analyze task tasks/<task_id> -k 5 -a claude-code
 ```
 
-Or classify a single completed trial:
-
-```bash
-taskgen analyze trial <trial_dir> --task-dir <task_dir> --agent claude-code
-```
-
 <details>
 <summary>Analysis Pipeline</summary>
 
@@ -178,11 +171,11 @@ taskgen analyze trial <trial_dir> --task-dir <task_dir> --agent claude-code
 <summary>Options</summary>
 
 - `-a, --agent TYPE` — Agent to run trials (default: `claude-code`)
-- `-m, --model MODEL` — Model for agent trials (default: `anthropic/claude-sonnet-4-20250514`)
+- `-m, --model MODEL` — Model for agent trials (default: `anthropic/claude-sonnet-4-5`)
 - `-k, --n-trials N` — Number of trials (default: 3)
 - `-n, --n-concurrent N` — Number of concurrent trials (default: 3, 1=sequential)
 - `--jobs-dir PATH` — Directory to store job artifacts (default: `.state/analyze-jobs`)
-- `--analysis-model MODEL` — Model for Claude Code classification (default: `claude-sonnet-4-20250514`)
+- `--analysis-model MODEL` — Model for Claude Code classification (default: `claude-sonnet-4-5`)
 - `--env, -e TYPE` — Environment type: `docker`, `daytona`, `e2b`, `modal`, `runloop`, `gke` (default: `docker`)
 - `--skip-quality-check` — Skip static quality check
 - `--skip-baseline` — Skip baseline validation (nop/oracle)
