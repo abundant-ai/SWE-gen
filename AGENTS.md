@@ -97,7 +97,7 @@ taskgen analyze task tasks/<task_id> -k 5 --save-to-dir
 Key options:
 - `-k, --n-trials`: Number of trials to run (default: 3)
 - `-n, --n-concurrent`: Number of concurrent trials (default: 3)
-- `--analysis-model`: Model for Claude Code classification (default: claude-sonnet-4-20250514)
+- `--analysis-model`: Model for Claude Code classification (default: claude-sonnet-4-5)
 - `--save-to-dir`: Write trajectory-analysis.{md,json} to each trial directory
 - `--skip-baseline`: Skip baseline validation (nop/oracle)
 - `--skip-classify`: Skip AI-powered trial classification
@@ -108,7 +108,7 @@ Key options:
 from taskgen.analyze import TrialClassifier, compute_task_verdict, write_trial_analysis_files
 
 # Classify a single trial
-classifier = TrialClassifier(model="claude-sonnet-4")
+classifier = TrialClassifier(model="claude-sonnet-4-5")
 classification = await classifier.classify_trial(trial_dir, task_dir)
 write_trial_analysis_files(trial_dir, classification, task_id, agent, model)
 ```
