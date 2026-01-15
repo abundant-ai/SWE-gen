@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from harbor.models.environment_type import EnvironmentType
 from rich.console import Console
+from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.table import Table
 
 from .harbor_runner import parse_harbor_outcome, run_harbor_agent
+
+DOCKER_CLEANUP_CMD = "docker system prune -af"
 
 
 @dataclass
@@ -26,6 +31,7 @@ class ValidateArgs:
     max_parallel: int = 8
     show_passed: bool = False
     output_file: Path | None = None  # Write results to file as they complete
+    docker_prune_batch: int = 5  # Run docker cleanup after every N tasks (0 to disable)
 
 
 @dataclass
@@ -178,6 +184,9 @@ def _run_batch_mode(args: ValidateArgs, dataset_path: Path) -> None:
     console.print(f"[blue]Parallel: {args.max_parallel} | Agent: {args.agent}[/blue]")
     if args.output_file:
         console.print(f"[blue]Output: {args.output_file}[/blue]")
+    # Show docker prune setting for local docker
+    if args.environment == EnvironmentType.DOCKER and args.docker_prune_batch > 0:
+        console.print(f"[blue]Docker prune: every {args.docker_prune_batch} tasks[/blue]")
     console.print()
 
     # Run validations
@@ -192,6 +201,7 @@ def _run_batch_mode(args: ValidateArgs, dataset_path: Path) -> None:
             args.environment,
             console,
             args.output_file,
+            args.docker_prune_batch,
         )
     )
 
@@ -213,9 +223,14 @@ async def _validate_batch(
     environment: EnvironmentType,
     console: Console,
     output_file: Path | None = None,
+    docker_prune_batch: int = 5,
 ) -> list[ValidationResult]:
     """Run validations in parallel with progress bar."""
     semaphore = asyncio.Semaphore(max_parallel)
+    
+    # Track completed count for docker pruning
+    completed_count = 0
+    prune_lock = asyncio.Lock()
 
     # Lock and file handle for sequential writes
     write_lock = asyncio.Lock()
@@ -302,6 +317,18 @@ async def _validate_batch(
             await write_result(result)
             return result
 
+    async def maybe_prune_docker(count: int) -> None:
+        """Run docker prune if conditions are met (local docker only, every N tasks)."""
+        if environment != EnvironmentType.DOCKER:
+            return
+        if docker_prune_batch <= 0:
+            return
+        if count % docker_prune_batch != 0:
+            return
+        
+        async with prune_lock:
+            await asyncio.to_thread(_prune_docker, console)
+
     # Run with progress bar
     results = []
     try:
@@ -317,6 +344,10 @@ async def _validate_batch(
             for coro in asyncio.as_completed([validate_one(d) for d in task_dirs]):
                 results.append(await coro)
                 progress.update(task_prog, advance=1)
+                
+                # Docker cleanup after batch (local docker only)
+                completed_count = len(results)
+                await maybe_prune_docker(completed_count)
     finally:
         if file_handle:
             # Write summary at end
@@ -456,3 +487,37 @@ def _add_result_row(table: Table, result: ValidationResult, agent: str) -> None:
 
     row.extend(["❌ FAIL", "; ".join(notes)])
     table.add_row(*row, style="red")
+
+
+def _prune_docker(console: Console) -> None:
+    """Run docker cleanup to free disk space."""
+    if shutil.which("docker") is None:
+        console.print(
+            "[yellow]Skipping docker prune (docker binary not found in PATH).[/yellow]"
+        )
+        return
+
+    console.print(
+        Panel(
+            f"Running docker cleanup: {DOCKER_CLEANUP_CMD}",
+            title="Disk cleanup",
+            border_style="yellow",
+        )
+    )
+
+    try:
+        result = subprocess.run(
+            DOCKER_CLEANUP_CMD,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if result.returncode == 0:
+            console.print("[green]Docker cleanup completed[/green]")
+        else:
+            console.print(f"[yellow]Docker cleanup returned code {result.returncode}[/yellow]")
+    except subprocess.TimeoutExpired:
+        console.print("[yellow]Docker cleanup timed out after 10 minutes[/yellow]")
+    except Exception as e:
+        console.print(f"[yellow]Docker cleanup failed: {e}[/yellow]")

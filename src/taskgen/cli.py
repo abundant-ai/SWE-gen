@@ -187,6 +187,11 @@ def validate(
     | None = typer.Option(
         None, "-o", "--output", help="Write results to file as they complete (batch mode only)"
     ),
+    docker_prune_batch: int = typer.Option(
+        5,
+        help="Run docker cleanup after every N tasks (0 to disable, local docker only)",
+        show_default=True,
+    ),
 ) -> None:
     if agent not in ("both", "nop", "oracle"):
         raise typer.BadParameter("agent must be one of: both, nop, oracle")
@@ -203,6 +208,7 @@ def validate(
             max_parallel=max_parallel,
             show_passed=show_passed,
             output_file=output,
+            docker_prune_batch=docker_prune_batch,
         )
     )
 

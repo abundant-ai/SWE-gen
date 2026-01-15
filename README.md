@@ -136,6 +136,7 @@ taskgen validate tasks/<task_id>
 - `--max-parallel N` — Max parallel validations (default: 8)
 - `--show-passed` — Show passed tasks in batch mode
 - `--output, -o PATH` — Write results to file as they complete (batch mode only)
+- `--docker-prune-batch N` — Run docker cleanup after every N tasks (default: 5, 0 to disable)
 - `-v, --verbose` / `-q, --quiet`
 
 </details>
