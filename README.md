@@ -8,9 +8,13 @@
 
 ## Overview
 
-Automates creation of Harbor tasks from real-world bug fixes in open-source repositories. Works with **any programming language**: Claude Code analyzes the repo to detect language, runtime, build system, and test framework.
+Automates task creation from real bug fixes in open-source GitHub repos. Works with **any programming language**: Claude Code analyzes the repo to detect language, build system, and test framework.
 
-Each task reverses a merged PR to recreate the buggy state, validates tests fail on baseline, and pass after applying the fix. Fully containerized with all dependencies installed at build time.
+Each task reverses a merged PR to recreate the buggy state, verifies tests fail on baseline, and pass after applying the fix. Fully containerized with all dependencies installed at build time.
+
+## News
+
+- [01/2026] **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS tasks generated with SWE-gen
 
 ## Quick Start
 
@@ -19,7 +23,7 @@ Each task reverses a merged PR to recreate the buggy state, validates tests fail
 uv pip install swegen
 
 # Generate a task from a merged PR
-swegen create --repo axios/axios --pr 7150 --verbose
+swegen create --repo axios/axios --pr 7150
 
 # Or farm all PRs from a repo
 swegen farm fastapi/fastapi
@@ -31,13 +35,7 @@ swegen farm fastapi/fastapi
 uv pip install swegen
 ```
 
-**Requirements:**
-- Python 3.12+
-- Docker
-- uv
-- [Claude Code CLI](https://github.com/anthropics/claude-code)
-
-**Secrets:** Create a `.env` file:
+Ensure these environment variables are set:
 
 ```bash
 export GITHUB_TOKEN=<gh-token>
@@ -50,9 +48,9 @@ export ANTHROPIC_API_KEY=<api-key>  # or CLAUDE_CODE_OAUTH_TOKEN
 ## Usage
 
 **Commands:**
-- `swegen create` — Generate task from a merged PR (validates by default)
+- `swegen create` — Generate a task from a merged PR
 - `swegen farm` — Continuously process PRs from a repository
-- `swegen validate` — Validate existing Harbor task (NOP + Oracle)
+- `swegen validate` — Validate existing task (NOP + Oracle)
 - `swegen analyze` — Deep analysis with agent trials to verify task quality
 
 ### Generate a Task
@@ -81,15 +79,12 @@ swegen create --repo <owner/repo> --pr <num>
 
 ### Continuous PR Farming
 
-Stream through entire PR history, process each immediately with automatic state persistence.
+Stream through entire PR history, process each sequentially with state persistence.
 
 ```bash
 swegen farm fastapi/fastapi
 swegen farm fastapi/fastapi --resume-from 2024-01-15
-swegen farm fastapi/fastapi --reset
 ```
-
-**Features:** Page-by-page streaming, automatic resumption, graceful shutdown (Ctrl+C), quality filters (test changes + minimum difficulty)
 
 <details>
 <summary>Options</summary>
@@ -122,7 +117,7 @@ swegen farm fastapi/fastapi --reset
 Verify that a task passes NOP (baseline fails) and Oracle (solution succeeds) agents:
 
 ```bash
-swegen validate tasks/<task_id>
+swegen validate <task_id>
 ```
 
 <details>
@@ -146,23 +141,23 @@ swegen validate tasks/<task_id>
 Run agent trials to verify a task is well-specified and solvable:
 
 ```bash
-swegen analyze tasks/<task_id>
-swegen analyze tasks/<task_id> -k 5 -a claude-code
+swegen analyze <task_id>
+swegen analyze <task_id> -k 5 -a claude-code
 ```
 
 <details>
-<summary>Analysis Pipeline</summary>
+<summary>What analyze does</summary>
 
-1. Static quality check (Harbor's `tasks check`)
-2. Baseline validation (nop should fail, oracle should pass)
-3. Run N agent trials (default: 3 with Claude Code)
-4. AI-powered trial classification (identifies TASK vs AGENT problems)
+1. Static quality check (`harbor tasks check`)
+2. Baseline validation (nop fails, oracle passes)
+3. Run N agent trials
+4. Trial classification (identifies TASK vs AGENT problems)
 5. Task verdict synthesis with actionable recommendations
 
 **Classification categories:**
 - `GOOD_SUCCESS` — Agent solved it correctly
 - `BAD_SUCCESS` — Agent cheated or tests too permissive
-- `GOOD_FAILURE` — Agent failed due to its own limitations (expected for hard tasks)
+- `GOOD_FAILURE` — Agent failed due to its own limitations
 - `BAD_FAILURE` — Agent failed due to task issues (underspecified, brittle tests, etc.)
 - `HARNESS_ERROR` — Infrastructure problem
 
@@ -230,25 +225,6 @@ The pipeline uses a **language-agnostic approach**:
 - PR evaluation uses LLM to check substantiality and generate instructions
 
 </details>
-
-## Examples
-
-```bash
-# Generate a Python task
-swegen create --repo kludex/starlette --pr 2949
-
-# a JavaScript task
-swegen create --repo axios/axios --pr 7150
-
-# Continuous farming
-swegen farm colinhacks/zod
-
-# Validate existing task
-swegen validate examples/axios__axios-7150
-
-# Analyze task quality with agent trials
-swegen analyze examples/axios__axios-7150
-```
 
 ## License
 
