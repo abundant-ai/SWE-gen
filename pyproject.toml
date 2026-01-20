@@ -1,5 +1,5 @@
 [project]
-name = "swe-gen"
+name = "swegen"
 version = "0.1.0"
 description = "Pipeline to convert GitHub PRs into Harbor tasks"
 readme = "README.md"
