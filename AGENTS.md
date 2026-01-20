@@ -84,14 +84,11 @@ swegen validate tasks/  # Batch mode
 ```
 
 ### `swegen analyze`
-Analyze task quality or classify trial outcomes. Has two subcommands:
-
-#### `swegen analyze task`
 Run multiple agent trials and analyze task quality.
 
 ```bash
-swegen analyze task tasks/<task_id> -k 3 -a claude-code
-swegen analyze task tasks/<task_id> -k 5 --save-to-dir
+swegen analyze tasks/<task_id> -k 3 -a claude-code
+swegen analyze tasks/<task_id> -k 5 --save-to-dir
 ```
 
 Key options:
@@ -112,9 +109,6 @@ classifier = TrialClassifier(model="claude-sonnet-4-5")
 classification = await classifier.classify_trial(trial_dir, task_dir)
 write_trial_analysis_files(trial_dir, classification, task_id, agent, model)
 ```
-
-### `swegen clean`
-Remove local artifacts (.state, logs, jobs).
 
 ---
 
@@ -150,8 +144,7 @@ src/swegen/
 └── tools/                  # Utility tools
     ├── validate.py         # Harbor NOP/Oracle validation
     ├── harbor_runner.py    # Harbor CLI wrapper
-    ├── validate_utils.py   # Validation helpers
-    └── clean.py            # Artifact cleanup
+    └── validate_utils.py   # Validation helpers
 ```
 
 ---
@@ -326,7 +319,6 @@ All configuration is done via dataclasses in `config.py`:
 - **CreateConfig** - Single PR → task conversion
 - **FarmConfig** - Continuous PR farming
 - **ValidateConfig** - Task validation
-- **CleanConfig** - Artifact cleanup
 
 Key defaults:
 - Claude Code always used for task completion

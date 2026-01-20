@@ -15,7 +15,6 @@ from swegen.create import MissingIssueError, TrivialPRError
 from swegen.create.create import run_reversal
 from swegen.farm import StreamFarmer
 from swegen.analyze import AnalyzeArgs, run_analyze, TrialClassifier, write_trial_analysis_files
-from swegen.tools.clean import run_clean
 from swegen.tools.validate import ValidateArgs, run_validate
 from swegen.tools.validate_utils import ValidationError
 
@@ -127,29 +126,6 @@ def create_cmd(
 app.add_typer(create_app, name="create")
 
 
-@app.command(
-    help="Remove local artifacts: .state/* runs/jobs/logs; options for ledgers/cache/tasks"
-)
-def clean(
-    state_dir: Path = typer.Option(Path(".state"), help="State dir to clean", show_default=True),
-    output: Path = typer.Option(Path("tasks"), help="Tasks output root", show_default=True),
-    all: bool = typer.Option(False, "--all", help="Also remove ledgers, cache, and tasks outputs"),
-    ledgers: bool = typer.Option(False, help="Also remove .state/create.jsonl"),
-    cache: bool = typer.Option(False, help="Also remove .state/cache"),
-    tasks: bool = typer.Option(False, help="Also remove tasks/"),
-    dry_run: bool = typer.Option(False, help="Print what would be removed without deleting"),
-) -> None:
-    run_clean(
-        state_dir=state_dir,
-        output_root=output,
-        all_=all,
-        ledgers=ledgers,
-        cache=cache,
-        tasks=tasks,
-        dry_run=dry_run,
-    )
-
-
 @app.command(help="Validate an existing Harbor task by running NOP and ORACLE")
 def validate(
     path: Path = typer.Argument(
@@ -213,15 +189,8 @@ def validate(
     )
 
 
-analyze_app = typer.Typer(
-    no_args_is_help=True,
-    add_completion=False,
-    help="Analyze task quality or classify trial outcomes",
-)
-
-
-@analyze_app.command(name="task", help="Analyze a task by running agent trials and classifying outcomes")
-def analyze_task(
+@app.command(help="Analyze a task by running agent trials and classifying outcomes")
+def analyze(
     path: Path = typer.Argument(..., help="Path to the task directory to analyze"),
     agent: str = typer.Option(
         "claude-code", "-a", "--agent", help="Agent to run trials with", show_default=True
@@ -313,10 +282,10 @@ def analyze_task(
 
     Examples:
         # Sequential (default)
-        swegen analyze task tasks/my-task -k 5
+        swegen analyze tasks/my-task -k 5
 
         # Parallel (3 trials at once)
-        swegen analyze task tasks/my-task -k 10 -n 3
+        swegen analyze tasks/my-task -k 10 -n 3
     """
     run_analyze(
         AnalyzeArgs(
@@ -340,7 +309,6 @@ def analyze_task(
     )
 
 
-app.add_typer(analyze_app, name="analyze")
 
 
 @app.command(help="Continuous PR farming - stream through entire PR history")

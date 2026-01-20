@@ -140,26 +140,3 @@ class ValidateConfig:
     quiet: bool = False
     max_parallel: int = 8
     show_passed: bool = False
-
-
-@dataclass(frozen=True)
-class CleanConfig:
-    """Configuration for the clean command.
-
-    Attributes:
-        state_dir: State directory to clean
-        output_root: Tasks output root
-        all_: Remove ledgers, cache, and tasks outputs
-        ledgers: Remove .state/create.jsonl
-        cache: Remove .state/cache
-        tasks: Remove tasks/
-        dry_run: Print what would be removed without deleting
-    """
-
-    state_dir: Path = field(default_factory=lambda: Path(".state"))
-    output_root: Path = field(default_factory=lambda: Path("tasks"))
-    all_: bool = False
-    ledgers: bool = False
-    cache: bool = False
-    tasks: bool = False
-    dry_run: bool = False
