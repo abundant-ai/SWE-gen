@@ -53,7 +53,6 @@ export ANTHROPIC_API_KEY=<api-key>  # or CLAUDE_CODE_OAUTH_TOKEN
 - `swegen farm` — Continuously process PRs from a repository
 - `swegen validate` — Validate existing Harbor task (NOP + Oracle)
 - `swegen analyze` — Deep analysis with agent trials to verify task quality
-- `swegen clean` — Remove .state artifacts
 
 ### Generate a Task
 
