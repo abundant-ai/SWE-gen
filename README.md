@@ -1,10 +1,24 @@
+<p align="center">
+  <a href="https://github.com/abundant-ai/swe-gen">
+    <img src="swe-gen-wide.png" style="height: 10em" alt="SWE-gen llama genie" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://www.python.org/downloads/">
+    <img alt="Python" src="https://img.shields.io/badge/python-3.12+-blue.svg">
+  </a>
+  <a href="https://opensource.org/licenses/Apache-2.0">
+    <img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg">
+  </a>
+  <a href="https://pypi.org/project/swegen/">
+    <img alt="PyPI" src="https://img.shields.io/pypi/v/swegen.svg">
+  </a>
+</p>
+
 # SWE-gen
 
 > Convert merged GitHub PRs into [Harbor](https://github.com/laude-institute/harbor) tasks automatically.
-
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![PyPI](https://img.shields.io/pypi/v/swegen.svg)](https://pypi.org/project/swegen/)
 
 ## Overview
 
@@ -14,7 +28,7 @@ Each task reverses a merged PR to recreate the buggy state, verifies tests fail 
 
 ## News
 
-- [01/2026] **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS tasks generated with SWE-gen
+- [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
 
 ## Quick Start
 
