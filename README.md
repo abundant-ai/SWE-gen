@@ -18,7 +18,7 @@ Each task reverses a merged PR to recreate the buggy state, validates tests fail
 uv pip install -e .
 
 # Generate a task from a merged PR
-swegen create --repo axios/axios --pr 7150
+swegen create --repo axios/axios --pr 7150 --verbose
 
 # Or farm all PRs from a repo
 swegen farm fastapi/fastapi

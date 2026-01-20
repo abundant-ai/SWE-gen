@@ -20,19 +20,19 @@ classifiers = [
     "Topic :: Software Development :: Quality Assurance",
 ]
 dependencies = [
-    "PyGithub>=2.1.1",
-    "GitPython>=3.1.40",
-    "PyYAML>=6.0.1",
-    "requests>=2.31.0",
-    "click>=8.1.7",
-    "typer>=0.16.0",
-    "rich>=14.1.0",
-    "docker>=7.0.0",
-    "openai>=1.43.0",
-    "pydantic>=2.8.2",
-    "python-dotenv>=1.0.0",
-    "claude-agent-sdk>=0.1.18",
-    "harbor>=0.1.34",
+    "PyGithub>=2.8.1",
+    "GitPython>=3.1.46",
+    "PyYAML>=6.0.3",
+    "requests>=2.32.5",
+    "click>=8.3.1",
+    "typer>=0.21.1",
+    "rich>=14.2.0",
+    "docker>=7.1.0",
+    "openai>=2.15.0",
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+    "claude-agent-sdk>=0.1.20",
+    "harbor>=0.1.41",
 ]
 
 [project.urls]
@@ -47,17 +47,17 @@ harbor = "harbor.cli.main:app"
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.4.3",
-    "black>=23.12.0",
-    "ruff>=0.1.8",
+    "pytest>=9.0.2",
+    "black>=25.12.0",
+    "ruff>=0.14.10",
 ]
 
 [dependency-groups]
 dev = [
-    "pytest>=7.4.3",
-    "black>=23.12.0",
-    "ruff>=0.1.8",
-    "pre-commit>=3.5.0",
+    "pytest>=9.0.2",
+    "black>=25.12.0",
+    "ruff>=0.14.10",
+    "pre-commit>=4.5.1",
 ]
 
 
