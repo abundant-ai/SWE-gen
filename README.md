@@ -4,6 +4,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI](https://img.shields.io/pypi/v/swegen.svg)](https://pypi.org/project/swegen/)
 
 ## Overview
 
@@ -15,7 +16,7 @@ Each task reverses a merged PR to recreate the buggy state, validates tests fail
 
 ```bash
 # Install
-uv pip install -e .
+uv pip install swegen
 
 # Generate a task from a merged PR
 swegen create --repo axios/axios --pr 7150 --verbose
@@ -27,7 +28,7 @@ swegen farm fastapi/fastapi
 ## Installation
 
 ```bash
-uv pip install -e .
+uv pip install swegen
 ```
 
 **Requirements:**
