@@ -6,7 +6,11 @@ from swegen.analyze.models import (
     TaskVerdict,
     TrialClassification,
 )
-from swegen.analyze.classifier import TrialClassifier, write_trial_analysis_files
+from swegen.analyze.classifier import (
+    TrialClassifier,
+    classify_trial,
+    compute_task_verdict,
+)
 from swegen.analyze.run import AnalyzeArgs, AnalysisResult, run_analyze
 
 __all__ = [
@@ -19,6 +23,7 @@ __all__ = [
     "TaskVerdict",
     "TrialClassification",
     "TrialClassifier",
+    "classify_trial",
+    "compute_task_verdict",
     "run_analyze",
-    "write_trial_analysis_files",
 ]

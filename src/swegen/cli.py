@@ -252,11 +252,6 @@ def analyze(
         help="Timeout for verdict synthesis in seconds",
         show_default=True,
     ),
-    save_to_dir: bool = typer.Option(
-        False,
-        "--save-to-dir",
-        help="Write trajectory-analysis.{md,json} to each trial directory",
-    ),
 ) -> None:
     """
     Analyze a Harbor task to determine if it's well-specified.
@@ -304,7 +299,6 @@ def analyze(
             verbose=verbose,
             classification_timeout=classification_timeout,
             verdict_timeout=verdict_timeout,
-            save_to_dir=save_to_dir,
         )
     )
 

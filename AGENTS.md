@@ -88,26 +88,28 @@ Run multiple agent trials and analyze task quality.
 
 ```bash
 swegen analyze tasks/<task_id> -k 3 -a claude-code
-swegen analyze tasks/<task_id> -k 5 --save-to-dir
+swegen analyze tasks/<task_id> -k 5 -n 3  # run 5 trials, 3 concurrent
 ```
 
 Key options:
 - `-k, --n-trials`: Number of trials to run (default: 3)
 - `-n, --n-concurrent`: Number of concurrent trials (default: 3)
 - `--analysis-model`: Model for Claude Code classification (default: claude-sonnet-4-5)
-- `--save-to-dir`: Write trajectory-analysis.{md,json} to each trial directory
 - `--skip-baseline`: Skip baseline validation (nop/oracle)
 - `--skip-classify`: Skip AI-powered trial classification
 
 **Note**: For programmatic access to classification and verdict synthesis (e.g., CI integration), use the library directly:
 
 ```python
-from swegen.analyze import TrialClassifier, compute_task_verdict, write_trial_analysis_files
+from swegen.analyze import classify_trial, compute_task_verdict
 
-# Classify a single trial
-classifier = TrialClassifier(model="claude-sonnet-4-5")
-classification = await classifier.classify_trial(trial_dir, task_dir)
-write_trial_analysis_files(trial_dir, classification, task_id, agent, model)
+# Classify a single trial (simplest API)
+classification = classify_trial("path/to/trial", "path/to/task")
+print(classification.classification)  # GOOD_SUCCESS, BAD_FAILURE, etc.
+
+# Compute verdict from multiple classifications
+verdict = compute_task_verdict([classification1, classification2, ...])
+print(verdict.is_good, verdict.primary_issue)
 ```
 
 ---
@@ -290,11 +292,6 @@ Comprehensive task quality analysis module:
 - Distinguishes between task problems (BAD_FAILURE/BAD_SUCCESS) and agent limitations (GOOD_FAILURE)
 - Provides evidence, root cause analysis, and recommendations for task improvements
 - Aggregates results across all trials to compute overall task verdict
-
-**CI Integration:**
-- `--save-to-dir` flag writes per-trial analysis files (trajectory-analysis.{md,json})
-- Compatible with task-workflows trajectory analysis system
-- Enables batch verdict synthesis across multiple trials
 
 Components:
 - **run.py** - Main analysis orchestrator
