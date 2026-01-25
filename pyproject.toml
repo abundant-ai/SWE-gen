@@ -83,6 +83,12 @@ select = [
     "I",   # isort
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
+    "ARG", # flake8-unused-arguments
+    "PERF",# perflint
+    "PIE", # flake8-pie
+    "RET", # flake8-return
+    "RUF", # ruff-specific rules
+    "SIM", # flake8-simplify
     "UP",  # pyupgrade
 ]
 ignore = [
