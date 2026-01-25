@@ -5,7 +5,6 @@ from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 import typer
-import json
 from dotenv import load_dotenv
 from harbor.models.environment_type import EnvironmentType
 from rich.console import Console
@@ -14,7 +13,7 @@ from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError
 from swegen.create.create import run_reversal
 from swegen.farm import StreamFarmer
-from swegen.analyze import AnalyzeArgs, run_analyze, TrialClassifier, write_trial_analysis_files
+from swegen.analyze import AnalyzeArgs, run_analyze
 from swegen.tools.validate import ValidateArgs, run_validate
 from swegen.tools.validate_utils import ValidationError
 
