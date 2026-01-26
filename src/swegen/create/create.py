@@ -288,6 +288,7 @@ def _display_summary_panel(
     task_dir: Path,
     gen_log_path: Path,
     validation_table: Table | None,
+    linked_issues: list[dict] | None = None,
 ) -> None:
     """Display the summary panel with task and PR context."""
     # Count test files
@@ -309,6 +310,12 @@ def _display_summary_panel(
     summary = Table(show_header=False, box=None)
     summary.add_row("Repo", Text(repo))
     summary.add_row("PR", Text(str(pr)))
+
+    # Display linked issues (just numbers, like PR display)
+    if linked_issues:
+        issue_nums = [str(issue.get("number", "")) for issue in linked_issues]
+        summary.add_row("Linked issues", Text(", ".join(issue_nums)))
+
     summary.add_row("Base", Text("-"))  # Not tracked in current implementation
     summary.add_row("Head", Text("-"))  # Not tracked in current implementation
     summary.add_row("Changed files", Text("-"))  # Not tracked in current implementation
@@ -639,7 +646,8 @@ def run_reversal(config: CreateConfig) -> None:
 
         # Display final panels
         _display_summary_panel(
-            console, pipeline.repo, config.pr, task_id, task_dir, gen_log_path, validation_table
+            console, pipeline.repo, config.pr, task_id, task_dir, gen_log_path, validation_table,
+            linked_issues=linked_issues,
         )
         _display_logs_panel(
             console,
