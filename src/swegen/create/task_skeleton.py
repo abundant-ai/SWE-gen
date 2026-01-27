@@ -53,6 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     ca-certificates \\
     patch \\
     build-essential \\
+    software-properties-common \\
     && rm -rf /var/lib/apt/lists/*
 
 # TODO: Install language runtime

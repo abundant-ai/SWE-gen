@@ -479,9 +479,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     && rm -rf /var/lib/apt/lists/*
 
 # If specific version needed (e.g., 3.12, 3.13 from .python-version), use deadsnakes PPA:
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    software-properties-common \\
-    && add-apt-repository -y ppa:deadsnakes/ppa \\
+# NOTE: software-properties-common is already in base packages
+RUN add-apt-repository -y ppa:deadsnakes/ppa \\
     && apt-get update && apt-get install -y --no-install-recommends \\
     python3.X python3.X-dev python3.X-venv \\
     && ln -sf /usr/bin/python3.X /usr/bin/python3 \\
