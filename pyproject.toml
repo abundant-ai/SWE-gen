@@ -31,7 +31,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "claude-agent-sdk>=0.1.20",
-    "harbor>=0.1.41",
+    "harbor @ git+https://github.com/laude-institute/harbor.git",
 ]
 
 [project.urls]
@@ -63,6 +63,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/swegen"]

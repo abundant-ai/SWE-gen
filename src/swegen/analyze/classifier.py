@@ -4,13 +4,14 @@ import asyncio
 import os
 from pathlib import Path
 from typing import Any
-
+import json
 from claude_agent_sdk import (
     ClaudeAgentOptions,
     ClaudeSDKClient,
     ResultMessage,
 )
 from harbor.models.trial.result import TrialResult
+from openai import OpenAI
 from rich.console import Console
 
 from swegen.create.claude_code_utils import Colors, print_sdk_message
@@ -24,6 +25,12 @@ from .models import (
     TrialClassification,
     TrialClassificationModel,
 )
+
+
+# OpenAI verdict synthesis constants
+VERDICT_MODEL = "gpt-5.2"
+VERDICT_TIMEOUT = 120.0
+VERDICT_MAX_TOKENS = 4096
 
 
 # Load prompt templates
@@ -140,7 +147,28 @@ class TrialClassifier:
             TrialClassification with classification, evidence, and recommendations
         """
         # Read trial result to get the verified outcome
+        # Harbor job directories have structure:
+        #   job_dir/result.json (job summary - wrong!)
+        #   job_dir/task-xxx/result.json (trial result - correct!)
+        # We need to find the nested trial result.json
         result_path = trial_dir / "result.json"
+        
+        # Check if root result.json is a job summary (has n_total_trials field)
+        # If so, look for nested trial result.json in task-* subdirectory
+        if result_path.exists():
+            try:
+                root_data = json.loads(result_path.read_text())
+                if "n_total_trials" in root_data or "stats" in root_data:
+                    # This is a job summary, look for nested trial result
+                    for subdir in trial_dir.iterdir():
+                        if subdir.is_dir() and subdir.name.startswith("task-"):
+                            nested_result = subdir / "result.json"
+                            if nested_result.exists():
+                                result_path = nested_result
+                                break
+            except Exception:
+                pass  # If parsing fails, continue with original path
+        
         if not result_path.exists():
             return TrialClassification(
                 trial_name=trial_dir.name,
@@ -152,23 +180,41 @@ class TrialClassifier:
                 reward=None,
             )
         
+        # Extract reward - try multiple formats for compatibility
+        reward = None
+        result_json_raw = None
         try:
-            result = TrialResult.model_validate_json(result_path.read_text())
+            result_json_raw = json.loads(result_path.read_text())
+            
+            # Try parsing as Harbor's TrialResult first
+            try:
+                result = TrialResult.model_validate(result_json_raw)
+                if result.verifier_result and result.verifier_result.rewards:
+                    reward = result.verifier_result.rewards.get("reward")
+            except Exception:
+                # TrialResult parsing failed - try extracting reward from raw JSON
+                # Common locations: verifier_result.rewards.reward, reward, result.reward
+                if isinstance(result_json_raw, dict):
+                    # Try nested verifier_result path
+                    vr = result_json_raw.get("verifier_result", {})
+                    if isinstance(vr, dict):
+                        rewards = vr.get("rewards", {})
+                        if isinstance(rewards, dict):
+                            reward = rewards.get("reward")
+                    # Try direct reward field
+                    if reward is None:
+                        reward = result_json_raw.get("reward")
         except Exception as e:
+            # JSON parsing failed entirely
             return TrialClassification(
                 trial_name=trial_dir.name,
                 classification=Classification.HARNESS_ERROR,
                 subtype="Invalid Result",
-                evidence=f"Could not parse result.json: {e}",
+                evidence=f"Could not parse result.json as JSON: {e}",
                 root_cause="Trial result file is corrupted or malformed",
                 recommendation="Check Harbor logs for what went wrong",
                 reward=None,
             )
-        
-        # Extract reward
-        reward = None
-        if result.verifier_result and result.verifier_result.rewards:
-            reward = result.verifier_result.rewards.get("reward")
         
         # Determine result string for prompt
         if reward == 1.0:
@@ -250,24 +296,14 @@ class TrialClassifier:
             return self._parse_trial_classification_structured(structured_output, trial_dir.name, reward)
             
         except Exception as e:
-            # Fallback classification based on reward
-            if reward == 1.0:
-                classification = Classification.GOOD_SUCCESS
-                subtype = "Presumed Correct"
-            elif reward == 0.0:
-                classification = Classification.GOOD_FAILURE
-                subtype = "Presumed Agent Error"
-            else:
-                classification = Classification.HARNESS_ERROR
-                subtype = "Classification Failed"
-            
+            # Classification failed - report the error, don't guess
             return TrialClassification(
                 trial_name=trial_dir.name,
-                classification=classification,
-                subtype=subtype,
+                classification=Classification.HARNESS_ERROR,
+                subtype="Classification Failed",
                 evidence=f"Claude Code classification failed: {e}",
                 root_cause="Could not analyze trial with Claude Code",
-                recommendation="Review trial manually",
+                recommendation="Review trial manually or check authentication",
                 reward=reward,
             )
     
@@ -381,28 +417,34 @@ class TrialClassifier:
         return asyncio.run(self.classify_trials(trial_dirs, task_dir, console))
 
 
-async def compute_task_verdict_with_llm(
+def _compute_task_verdict_openai(
     classifications: list[TrialClassification],
     baseline: BaselineValidation | None = None,
     quality_check_passed: bool = True,
-    model: str = "claude-sonnet-4-5",
+    model: str = VERDICT_MODEL,
     console: "Console | None" = None,
     verbose: bool = False,
-    timeout: int = 180,  # 3 minutes for verdict synthesis
+    api_key: str | None = None,
 ) -> TaskVerdict:
-    """Compute task verdict using LLM to synthesize trial analyses.
+    """Compute task verdict using OpenAI to synthesize trial analyses.
+    
+    Uses OpenAI's structured outputs for fast, reliable verdict synthesis.
+    This is much simpler and faster than Claude Code since no file access is needed.
     
     Args:
         classifications: List of individual trial classifications
         baseline: Optional baseline validation results
         quality_check_passed: Whether static quality check passed
-        model: Model name for Claude Code
+        model: OpenAI model to use (default: gpt-5.2)
         console: Optional console for progress output
-        verbose: If True, stream Claude Code output to console
-        timeout: Maximum time for verdict synthesis in seconds (default: 180 = 3 min)
+        verbose: If True, print progress messages
+        api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)
         
     Returns:
         TaskVerdict with LLM-synthesized analysis
+        
+    Raises:
+        RuntimeError: If OPENAI_API_KEY is not set or LLM call fails
     """
     if not classifications:
         return TaskVerdict(
@@ -411,6 +453,10 @@ async def compute_task_verdict_with_llm(
             primary_issue="No trials to analyze",
             recommendations=["Run agent trials first"],
         )
+    
+    # Check API key
+    if not (api_key or os.getenv("OPENAI_API_KEY")):
+        raise RuntimeError("OPENAI_API_KEY not set for verdict synthesis")
     
     # Format baseline summary
     if baseline:
@@ -446,72 +492,39 @@ async def compute_task_verdict_with_llm(
     )
     
     if console:
-        console.print("  [dim]Synthesizing verdict with LLM...[/dim]")
-    
-    # Run Claude Code with simple query (no file access needed)
-    options = ClaudeAgentOptions(
-        permission_mode="bypassPermissions",
-        allowed_tools=[],  # No file access needed
-        model=model,
-        output_format={
-            "type": "json_schema",
-            "schema": TaskVerdictModel.model_json_schema(),
-        },
-    )
-    
-    # Check for authentication
-    has_auth = bool(os.getenv("CLAUDE_CODE_OAUTH_TOKEN") or os.getenv("ANTHROPIC_API_KEY"))
-    if not has_auth:
-        raise RuntimeError(
-            "No Claude authentication configured for verdict synthesis. "
-            "Set either CLAUDE_CODE_OAUTH_TOKEN (preferred, run 'claude setup-token') "
-            "or ANTHROPIC_API_KEY"
-        )
+        console.print("  [dim]Synthesizing verdict with OpenAI...[/dim]")
     
     if verbose:
-        print(f"\n{Colors.YELLOW}[Verdict] Synthesizing task verdict with LLM (timeout: {timeout}s)...{Colors.RESET}", flush=True)
-        print("-" * 60, flush=True)
+        print(f"\n{Colors.YELLOW}[Verdict] Synthesizing task verdict with {model}...{Colors.RESET}", flush=True)
     
-    structured_output: Any = None
+    # Create OpenAI client and make structured output call
+    client = OpenAI(
+        api_key=api_key or os.getenv("OPENAI_API_KEY"),
+        timeout=VERDICT_TIMEOUT,
+    )
+    
     try:
-        async with asyncio.timeout(timeout):
-            async with ClaudeSDKClient(options=options) as client:
-                await client.query(prompt)
-                
-                async for message in client.receive_response():
-                    if verbose:
-                        print_sdk_message(message)
-                    if isinstance(message, ResultMessage):
-                        structured_output = message.structured_output
-        
-        if verbose:
-            print("-" * 60, flush=True)
-            print(f"{Colors.GREEN}[Verdict] Verdict synthesis complete{Colors.RESET}\n", flush=True)
-    except TimeoutError:
-        if verbose:
-            print("-" * 60, flush=True)
-            print(f"{Colors.RED}[Verdict] Timed out after {timeout}s{Colors.RESET}\n", flush=True)
-        # Return a fallback verdict based on simple heuristics
-        if console:
-            console.print(f"  [yellow]⚠ Verdict synthesis timed out, using fallback heuristics[/yellow]")
-        
-        task_problem_count = sum(1 for c in classifications if c.is_task_problem)
-        return TaskVerdict(
-            is_good=task_problem_count == 0,
-            confidence="low",
-            primary_issue=f"Verdict synthesis timed out ({task_problem_count} task problems detected)",
-            recommendations=["Retry analysis with increased timeout", "Review trial classifications manually"],
-            task_problem_count=task_problem_count,
-            agent_problem_count=sum(1 for c in classifications if c.classification == Classification.GOOD_FAILURE),
-            success_count=sum(1 for c in classifications if c.classification in (Classification.GOOD_SUCCESS, Classification.BAD_SUCCESS)),
-            harness_error_count=sum(1 for c in classifications if c.classification == Classification.HARNESS_ERROR),
-            classifications=classifications,
-            baseline=baseline,
+        completion = client.beta.chat.completions.parse(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt},
+            ],
+            response_format=TaskVerdictModel,
+            max_completion_tokens=VERDICT_MAX_TOKENS,
         )
-    
-    if structured_output is None:
-        raise RuntimeError("Claude Agent SDK did not return structured_output for verdict synthesis")
-    verdict_model = _parse_verdict_structured(structured_output)
+        
+        verdict_model = completion.choices[0].message.parsed
+        if verdict_model is None:
+            raise RuntimeError("OpenAI returned no parsed result for verdict synthesis")
+        
+        if verbose:
+            print(f"{Colors.GREEN}[Verdict] Verdict synthesis complete{Colors.RESET}\n", flush=True)
+        
+    except Exception as exc:
+        exc_type = type(exc).__name__
+        if verbose:
+            print(f"{Colors.RED}[Verdict] Failed ({exc_type}): {exc}{Colors.RESET}\n", flush=True)
+        raise RuntimeError(f"Verdict synthesis failed: {exc}") from exc
     
     # Build TaskVerdict from LLM response
     task_problem_count = sum(1 for c in classifications if c.is_task_problem)
@@ -532,53 +545,38 @@ async def compute_task_verdict_with_llm(
         baseline=baseline,
     )
 
-def _parse_verdict_structured(structured_output: Any) -> TaskVerdictModel:
-    """Parse and validate verdict from SDK structured output (preferred path)."""
-    data: Any = structured_output
-    if isinstance(data, dict):
-        if "verdict" in data and isinstance(data["verdict"], dict):
-            data = data["verdict"]
-        if "result" in data and isinstance(data["result"], dict):
-            data = data["result"]
-        if "structured_output" in data and isinstance(data["structured_output"], dict):
-            data = data["structured_output"]
-    return TaskVerdictModel.model_validate(data)
-
 
 def compute_task_verdict(
     classifications: list[TrialClassification],
     baseline: BaselineValidation | None = None,
     quality_check_passed: bool = True,
-    model: str = "claude-sonnet-4-5",
+    model: str = VERDICT_MODEL,
     console: "Console | None" = None,
     verbose: bool = False,
-    timeout: int = 180,
+    api_key: str | None = None,
 ) -> TaskVerdict:
     """Compute overall task verdict from trial classifications using LLM synthesis.
     
-    Uses Claude to intelligently synthesize individual trial analyses into a final verdict.
+    Uses OpenAI to intelligently synthesize individual trial analyses into a final verdict.
     Performs pattern recognition, root cause analysis, and generates actionable recommendations.
     
     Args:
         classifications: List of trial classifications
         baseline: Optional baseline validation results
         quality_check_passed: Whether static quality check passed
-        model: Model name for Claude synthesis (default: claude-sonnet-4-5)
+        model: OpenAI model name (default: gpt-5.2)
         console: Optional console for progress output
-        verbose: If True, stream Claude Code output to console
-        timeout: Maximum time for verdict synthesis in seconds (default: 180 = 3 min)
+        verbose: If True, print progress messages
+        api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)
         
     Returns:
         TaskVerdict with is_good, confidence, and recommendations
         
     Raises:
-        RuntimeError: If no Claude authentication is configured
+        RuntimeError: If OPENAI_API_KEY is not set
     """
-    # Use async LLM-based synthesis
-    return asyncio.run(
-        compute_task_verdict_with_llm(
-            classifications, baseline, quality_check_passed, model, console, verbose, timeout
-        )
+    return _compute_task_verdict_openai(
+        classifications, baseline, quality_check_passed, model, console, verbose, api_key
     )
 
 def classify_baseline_result(
