@@ -425,6 +425,7 @@ def _compute_task_verdict_openai(
     console: "Console | None" = None,
     verbose: bool = False,
     api_key: str | None = None,
+    timeout: float | None = None,
 ) -> TaskVerdict:
     """Compute task verdict using OpenAI to synthesize trial analyses.
     
@@ -439,6 +440,7 @@ def _compute_task_verdict_openai(
         console: Optional console for progress output
         verbose: If True, print progress messages
         api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)
+        timeout: Optional OpenAI client timeout override (seconds)
         
     Returns:
         TaskVerdict with LLM-synthesized analysis
@@ -500,7 +502,7 @@ def _compute_task_verdict_openai(
     # Create OpenAI client and make structured output call
     client = OpenAI(
         api_key=api_key or os.getenv("OPENAI_API_KEY"),
-        timeout=VERDICT_TIMEOUT,
+        timeout=timeout or VERDICT_TIMEOUT,
     )
     
     try:
@@ -554,6 +556,7 @@ def compute_task_verdict(
     console: "Console | None" = None,
     verbose: bool = False,
     api_key: str | None = None,
+    timeout: float | None = None,
 ) -> TaskVerdict:
     """Compute overall task verdict from trial classifications using LLM synthesis.
     
@@ -568,6 +571,7 @@ def compute_task_verdict(
         console: Optional console for progress output
         verbose: If True, print progress messages
         api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)
+        timeout: Optional OpenAI client timeout override (seconds)
         
     Returns:
         TaskVerdict with is_good, confidence, and recommendations
@@ -576,7 +580,14 @@ def compute_task_verdict(
         RuntimeError: If OPENAI_API_KEY is not set
     """
     return _compute_task_verdict_openai(
-        classifications, baseline, quality_check_passed, model, console, verbose, api_key
+        classifications,
+        baseline,
+        quality_check_passed,
+        model,
+        console,
+        verbose,
+        api_key,
+        timeout,
     )
 
 def classify_baseline_result(

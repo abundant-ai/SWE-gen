@@ -14,6 +14,7 @@ from swegen.create import MissingIssueError, TrivialPRError
 from swegen.create.create import run_reversal
 from swegen.farm import StreamFarmer
 from swegen.analyze import AnalyzeArgs, run_analyze
+from swegen.analyze.classifier import VERDICT_MODEL
 from swegen.tools.validate import ValidateArgs, run_validate
 from swegen.tools.validate_utils import ValidationError
 
@@ -251,6 +252,12 @@ def analyze(
         help="Timeout for verdict synthesis in seconds",
         show_default=True,
     ),
+    verdict_model: str = typer.Option(
+        VERDICT_MODEL,
+        "--verdict-model",
+        help="OpenAI model for verdict synthesis",
+        show_default=True,
+    ),
 ) -> None:
     """
     Analyze a Harbor task to determine if it's well-specified.
@@ -293,6 +300,7 @@ def analyze(
             skip_baseline=skip_baseline,
             skip_classify=skip_classify,
             analysis_model=analysis_model,
+            verdict_model=verdict_model,
             environment=environment,
             timeout_multiplier=timeout_multiplier,
             verbose=verbose,

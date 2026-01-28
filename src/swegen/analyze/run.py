@@ -24,6 +24,7 @@ from .classifier import (
     TrialClassifier,
     classify_baseline_result,
     compute_task_verdict,
+    VERDICT_MODEL,
 )
 from swegen.tools.harbor_runner import (
     harbor_cmd_base,
@@ -122,6 +123,7 @@ class AnalyzeArgs:
     skip_baseline: bool = False  # Skip baseline validation (nop/oracle)
     skip_classify: bool = False  # Skip Claude Code classification
     analysis_model: str = "claude-sonnet-4-5"  # Model for Claude Code classification
+    verdict_model: str = VERDICT_MODEL  # OpenAI model for verdict synthesis
     environment: str = "docker"  # Environment type (docker|daytona|e2b|modal|runloop|gke)
     verbose: bool = False
     timeout_multiplier: float = 1.0
@@ -249,7 +251,7 @@ def _run_analysis(
         classifications,
         baseline,
         quality_passed,
-        model=args.analysis_model,
+        model=args.verdict_model,
         console=console,
         verbose=args.verbose,
         timeout=args.verdict_timeout,
