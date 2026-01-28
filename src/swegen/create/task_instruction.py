@@ -235,12 +235,17 @@ def _format_user_prompt(
         for issue in sorted_issues:
             issue_num = issue.get("number", "")
             issue_title = issue.get("title", "")
+            issue_repo = issue.get("repo", "")
             issue_body = (issue.get("body", "") or "").strip()
             # Truncate issue body if too long
             if len(issue_body) > MAX_ISSUE_BODY_LENGTH:
                 issue_body = issue_body[:MAX_ISSUE_BODY_LENGTH] + "\n...(truncated)"
 
-            issue_lines.append(f"Issue #{issue_num}: {issue_title}")
+            # Include repo in issue reference if different from PR repo (cross-repo reference)
+            if issue_repo and issue_repo.lower() != repo.lower():
+                issue_lines.append(f"Issue {issue_repo}#{issue_num}: {issue_title}")
+            else:
+                issue_lines.append(f"Issue #{issue_num}: {issue_title}")
             if issue_body:
                 issue_lines.append(f"{issue_body}\n")
 
