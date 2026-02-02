@@ -1,6 +1,6 @@
 [project]
 name = "swegen"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pipeline to convert GitHub PRs into Harbor tasks"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -31,7 +31,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "claude-agent-sdk>=0.1.20",
-    "harbor @ git+https://github.com/laude-institute/harbor.git",
+    "harbor>=0.1.41",
 ]
 
 [project.urls]
