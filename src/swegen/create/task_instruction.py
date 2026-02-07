@@ -125,6 +125,13 @@ Examples:
 IMPORTANT: Generate exactly 3 tags.
 
 If NOT substantial, set instruction to null and provide a brief reason.
+
+TASK NAME (optional):
+If the user prompt says "Task name requested: yes", generate a short task_name.
+- 1-3 words, lowercase ASCII, dash-separated (e.g., "fix-http-header")
+- Do not include the repo name or PR number
+- Keep it descriptive of the behavior change
+If task name is NOT requested, set task_name to null.
 """
 
 
@@ -161,6 +168,7 @@ def _format_user_prompt(
     linked_issues: list[dict] | None = None,
     force_generate_instruction: bool = False,
     test_contents: dict[str, str] | None = None,
+    generate_task_name: bool = False,
 ) -> str:
     """Format user prompt for combined evaluation + task generation.
 
@@ -195,6 +203,15 @@ def _format_user_prompt(
             "Include specific function/method/class names from tests or issues, but NOT file paths or implementation details.\n"
             "REMEMBER: Do NOT mention test files - the agent won't see them. Write from a user/issue perspective.\n"
             "If not substantial, explain why briefly and set instruction to null."
+        )
+
+    # Build task name request section
+    task_name_section = ""
+    if generate_task_name:
+        task_name_section = (
+            "Task name requested: yes\n"
+            "Provide task_name as 1-3 lowercase words with dashes (ASCII letters/digits only).\n"
+            "Do not include repo name or PR number.\n\n"
         )
 
     # Build test contents section if provided
@@ -260,6 +277,7 @@ def _format_user_prompt(
             f"PR Title: {pr_title}\n\n"
             f"Linked Issue(s):\n{issues_section}\n\n"
             + pr_body_section
+            + task_name_section
             + test_section
             + f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n"
             + ending_instruction
@@ -274,6 +292,7 @@ def _format_user_prompt(
         f"Repository: {repo}\n"
         f"PR Title: {pr_title}\n\n"
         + (f"PR Description:\n{pr_body_truncated}\n\n" if pr_body_truncated else "")
+        + task_name_section
         + test_section
         + f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n\n"
         + ending_instruction
@@ -289,6 +308,7 @@ def evaluate_and_generate_task(
     linked_issues: list[dict] | None = None,
     force_generate_instruction: bool = False,
     test_contents: dict[str, str] | None = None,
+    generate_task_name: bool = False,
 ) -> CombinedPRTaskEvaluation:
     """Evaluate PR substantiality and generate task description in one LLM call.
 
@@ -303,6 +323,7 @@ def evaluate_and_generate_task(
         linked_issues: Optional list of linked issue dicts (with 'title', 'body', 'number')
         force_generate_instruction: If True, always generate an instruction even if PR seems trivial
         test_contents: Optional dict mapping test file paths to their contents
+        generate_task_name: If True, request a short semantic task name
 
     Returns:
         CombinedPRTaskEvaluation with evaluation and task details
@@ -349,6 +370,7 @@ def evaluate_and_generate_task(
         linked_issues=sanitized_linked_issues,
         force_generate_instruction=force_generate_instruction,
         test_contents=sanitized_test_contents,
+        generate_task_name=generate_task_name,
     )
 
     client = OpenAI(

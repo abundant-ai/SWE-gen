@@ -30,6 +30,7 @@ class CreateConfig:
         require_issue: Require PR to have a linked issue (higher quality instructions)
         allow_unmerged: Allow processing unmerged PRs (for testing/preview, default: False)
         environment: Environment type for Harbor runs (docker, daytona, e2b, modal, runloop, gke)
+        generate_name: Generate semantic task name instead of PR number
         verbose: Increase output verbosity
         quiet: Reduce output verbosity
     """
@@ -48,6 +49,7 @@ class CreateConfig:
     require_issue: bool = True
     allow_unmerged: bool = False
     environment: EnvironmentType = EnvironmentType.DOCKER
+    generate_name: bool = False
     verbose: bool = False
     quiet: bool = False
 

@@ -25,6 +25,10 @@ class CombinedPRTaskEvaluation(BaseModel):
         default_factory=list,
         description="Exactly 3 tags: [language, tier, framework/category]. Example: ['python', 'backend', 'fastapi']",
     )
+    task_name: str | None = Field(
+        None,
+        description="Optional short task name (1-3 words, dash-separated, lowercase) when requested",
+    )
 
 
 def strip_tests_prefix(path: str) -> str:

@@ -24,13 +24,19 @@ def get_merge_base(repo_path: Path, base_sha: str, head_sha: str) -> str:
         The merge-base commit SHA
     """
     logger = logging.getLogger("swegen")
-    result = subprocess.run(
-        ["git", "merge-base", base_sha, head_sha],
-        cwd=str(repo_path),
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", base_sha, head_sha],
+            cwd=str(repo_path),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        logger.warning(
+            "git merge-base failed; falling back to base_sha %s", base_sha
+        )
+        return base_sha
     merge_base = result.stdout.strip()
     if merge_base != base_sha:
         logger.debug("Using merge-base %s instead of base_sha %s", merge_base, base_sha)
@@ -62,11 +68,11 @@ def generate_diffs(
     logger = logging.getLogger("swegen")
 
     # Use merge-base to get actual fork point (fixes noisy patches)
-    base_sha = get_merge_base(repo_path, base_sha, head_sha)
+    actual_base = get_merge_base(repo_path, base_sha, head_sha)
 
     # Get all changed files
     result = subprocess.run(
-        ["git", "diff", "--name-only", base_sha, head_sha],
+        ["git", "diff", "--name-only", actual_base, head_sha],
         cwd=str(repo_path),
         check=True,
         capture_output=True,
@@ -86,7 +92,7 @@ def generate_diffs(
     logger.debug("Generating fix.patch (base → head, source only)...")
     if source_files:
         result = subprocess.run(
-            ["git", "diff", base_sha, head_sha, "--"] + source_files,
+            ["git", "diff", actual_base, head_sha, "--"] + source_files,
             cwd=str(repo_path),
             check=True,
             capture_output=True,
@@ -101,7 +107,7 @@ def generate_diffs(
     # This reverts everything so agent sees BASE state
     logger.debug("Generating bug.patch (head → base, ALL files)...")
     result = subprocess.run(
-        ["git", "diff", head_sha, base_sha],
+        ["git", "diff", head_sha, actual_base],
         cwd=str(repo_path),
         check=True,
         capture_output=True,

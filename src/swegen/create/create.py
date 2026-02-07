@@ -483,6 +483,7 @@ def run_reversal(config: CreateConfig) -> None:
                     min_source_files=config.min_source_files,
                     max_source_files=config.max_source_files,
                     environment=config.environment.value,
+                    generate_task_name=config.generate_name,
                 )
 
             skeleton_secs = time.perf_counter() - t0
