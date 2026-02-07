@@ -47,12 +47,13 @@ def generate_dockerfile(params: SkeletonParams) -> str:
     return f"""FROM ubuntu:24.04
 
 # Base system packages (common to all languages)
-RUN apt-get update && apt-get install -y \\
+RUN apt-get update && apt-get install -y --no-install-recommends \\
     git \\
     curl \\
     ca-certificates \\
     patch \\
     build-essential \\
+    software-properties-common \\
     && rm -rf /var/lib/apt/lists/*
 
 # TODO: Install language runtime
