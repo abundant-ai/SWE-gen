@@ -7,6 +7,36 @@ from pathlib import Path
 from .utils import _is_relevant_source, strip_tests_prefix
 
 
+def get_merge_base(repo_path: Path, base_sha: str, head_sha: str) -> str:
+    """
+    Find the merge-base (common ancestor) between base and head.
+
+    GitHub API's base.sha returns the current tip of the target branch,
+    not the actual fork point. This causes noisy patches when main has
+    moved forward since the PR was created.
+
+    Args:
+        repo_path: Path to the git repository
+        base_sha: Base commit SHA from GitHub API (tip of target branch)
+        head_sha: Head commit SHA (PR branch head)
+
+    Returns:
+        The merge-base commit SHA
+    """
+    logger = logging.getLogger("swegen")
+    result = subprocess.run(
+        ["git", "merge-base", base_sha, head_sha],
+        cwd=str(repo_path),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    merge_base = result.stdout.strip()
+    if merge_base != base_sha:
+        logger.debug("Using merge-base %s instead of base_sha %s", merge_base, base_sha)
+    return merge_base
+
+
 def generate_diffs(
     repo_path: Path,
     base_sha: str,
@@ -30,6 +60,9 @@ def generate_diffs(
         Tuple of (solution_diff, bug_diff)
     """
     logger = logging.getLogger("swegen")
+
+    # Use merge-base to get actual fork point (fixes noisy patches)
+    base_sha = get_merge_base(repo_path, base_sha, head_sha)
 
     # Get all changed files
     result = subprocess.run(
