@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,8 @@ class ValidationResult:
     oracle_reward: float | None
     nop_exit_code: int
     oracle_exit_code: int
+    ruff_passed: bool | None
+    ruff_summary: str | None
     passed: bool
     error: str | None = None
 
@@ -96,6 +99,7 @@ def _resolve_paths(args: ValidateArgs) -> tuple[Path, str | None, Path | None]:
 
 def _run_single_mode(args: ValidateArgs, dataset_path: Path, task_id: str, task_dir: Path) -> None:
     """Validate a single task with traditional output."""
+    console = Console()
     jobs_dir = args.jobs_dir.resolve()
     jobs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -105,17 +109,45 @@ def _run_single_mode(args: ValidateArgs, dataset_path: Path, task_id: str, task_
         task_id, dataset_path, jobs_dir, args.agent, args.timeout_multiplier, args.environment
     )
 
-    # Check results
-    if args.agent == "both":
-        if nop_reward != 0 or oracle_reward != 1:
-            print("\n[validate] FAILED: Harbor validation did not meet expectations")
-            print(f"  NOP: expected reward=0, got reward={nop_reward}")
-            print(f"  ORACLE: expected reward=1, got reward={oracle_reward}")
-            sys.exit(1)
-        else:
-            print("\n[validate] PASSED: Harbor validation met expectations")
-            print(f"  NOP: reward={nop_reward} ✓")
-            print(f"  ORACLE: reward={oracle_reward} ✓")
+    ruff_passed, ruff_output = _run_ruff_check(task_dir)
+    ruff_ok = True if ruff_passed is None else ruff_passed
+
+    agent_passed = _check_passed(args.agent, nop_reward, oracle_reward)
+    overall_passed = agent_passed and ruff_ok
+
+    if args.agent in ("nop", "both"):
+        nop_cell = f"{'PASS' if nop_reward == 0 else 'FAIL'} ({nop_reward})"
+    else:
+        nop_cell = "—"
+
+    if args.agent in ("oracle", "both"):
+        oracle_cell = f"{'PASS' if oracle_reward == 1 else 'FAIL'} ({oracle_reward})"
+    else:
+        oracle_cell = "—"
+
+    if ruff_passed is None:
+        ruff_cell = "SKIP"
+    elif ruff_passed:
+        ruff_cell = "PASS"
+    else:
+        summary = _ruff_summary(ruff_output)
+        ruff_cell = f"FAIL ({summary})" if summary else "FAIL"
+
+    summary = Table(title="Validation Summary", title_style="bold cyan", show_lines=True)
+    summary.add_column("NOP", justify="center")
+    summary.add_column("Oracle", justify="center")
+    summary.add_column("Ruff", justify="center")
+    summary.add_row(nop_cell, oracle_cell, ruff_cell)
+
+    console.print("\n")
+    console.print(summary)
+
+    if ruff_passed is False and ruff_output:
+        print("\n[validate] Ruff output:")
+        print(ruff_output.rstrip())
+
+    if not overall_passed:
+        sys.exit(1)
 
 
 def _run_agents(
@@ -227,7 +259,7 @@ async def _validate_batch(
 ) -> list[ValidationResult]:
     """Run validations in parallel with progress bar."""
     semaphore = asyncio.Semaphore(max_parallel)
-    
+
     # Track completed count for docker pruning
     completed_count = 0
     prune_lock = asyncio.Lock()
@@ -240,7 +272,9 @@ async def _validate_batch(
         file_handle = open(output_file, "w")
         # Write header
         file_handle.write(f"# Validation results - {len(task_dirs)} tasks\n")
-        file_handle.write("# Format: TASK_ID: NOP=<reward> ORACLE=<reward> <STATUS>\n\n")
+        file_handle.write(
+            "# Format: TASK_ID: NOP=<reward> ORACLE=<reward> RUFF=<PASS|FAIL|SKIP> <STATUS>\n\n"
+        )
         file_handle.flush()
 
     async def write_result(result: ValidationResult) -> None:
@@ -257,6 +291,8 @@ async def _validate_batch(
             try:
                 nop_reward = oracle_reward = None
                 nop_code = oracle_code = 0
+                ruff_passed, ruff_output = await asyncio.to_thread(_run_ruff_check, task_dir)
+                summary = _ruff_summary(ruff_output)
 
                 # Run NOP (capture_output=True to suppress Harbor's verbose output)
                 if agent in ("nop", "both"):
@@ -292,7 +328,9 @@ async def _validate_batch(
                     oracle_reward = parse_harbor_outcome(job).reward
 
                 # Determine pass/fail
-                passed = _check_passed(agent, nop_reward, oracle_reward)
+                agent_passed = _check_passed(agent, nop_reward, oracle_reward)
+                ruff_ok = True if ruff_passed is None else ruff_passed
+                passed = agent_passed and ruff_ok
 
                 result = ValidationResult(
                     task_id=task_dir.name,
@@ -300,6 +338,8 @@ async def _validate_batch(
                     oracle_reward=oracle_reward,
                     nop_exit_code=nop_code,
                     oracle_exit_code=oracle_code,
+                    ruff_passed=ruff_passed,
+                    ruff_summary=summary,
                     passed=passed,
                 )
             except Exception as e:
@@ -309,6 +349,8 @@ async def _validate_batch(
                     oracle_reward=None,
                     nop_exit_code=-1,
                     oracle_exit_code=-1,
+                    ruff_passed=None,
+                    ruff_summary=None,
                     passed=False,
                     error=str(e),
                 )
@@ -325,7 +367,7 @@ async def _validate_batch(
             return
         if count % docker_prune_batch != 0:
             return
-        
+
         async with prune_lock:
             await asyncio.to_thread(_prune_docker, console)
 
@@ -344,7 +386,7 @@ async def _validate_batch(
             for coro in asyncio.as_completed([validate_one(d) for d in task_dirs]):
                 results.append(await coro)
                 progress.update(task_prog, advance=1)
-                
+
                 # Docker cleanup after batch (local docker only)
                 completed_count = len(results)
                 await maybe_prune_docker(completed_count)
@@ -375,6 +417,13 @@ def _format_result_line(result: ValidationResult, agent: str) -> str:
             parts.append(f"ORACLE={result.oracle_reward}")
         else:
             parts.append("ORACLE=ERROR")
+
+    if result.ruff_passed is True:
+        parts.append("RUFF=PASS")
+    elif result.ruff_passed is False:
+        parts.append("RUFF=FAIL")
+    else:
+        parts.append("RUFF=SKIP")
 
     if result.error:
         parts.append(f"ERROR: {result.error}")
@@ -419,6 +468,7 @@ def _print_results(
         if agent in ("oracle", "both"):
             table.add_column("Oracle", justify="center")
 
+        table.add_column("Ruff", justify="center")
         table.add_column("Status", justify="center")
         table.add_column("Notes")
 
@@ -452,6 +502,7 @@ def _add_result_row(table: Table, result: ValidationResult, agent: str) -> None:
             row.append("?")
         if agent in ("oracle", "both"):
             row.append("?")
+        row.append("?")
         row.extend(["❌ ERROR", result.error])
         table.add_row(*row, style="red")
         return
@@ -462,6 +513,12 @@ def _add_result_row(table: Table, result: ValidationResult, agent: str) -> None:
             row.append(f"✓ ({result.nop_reward})" if result.nop_reward is not None else "—")
         if agent in ("oracle", "both"):
             row.append(f"✓ ({result.oracle_reward})" if result.oracle_reward is not None else "—")
+        if result.ruff_passed is True:
+            row.append("✓")
+        elif result.ruff_passed is False:
+            row.append("✗")
+        else:
+            row.append("—")
         row.extend(["✅ PASS", ""])
         table.add_row(*row, style="green")
         return
@@ -485,6 +542,15 @@ def _add_result_row(table: Table, result: ValidationResult, agent: str) -> None:
         else:
             row.append("—")
 
+    if result.ruff_passed is True:
+        row.append("✓")
+    elif result.ruff_passed is False:
+        row.append("✗")
+        if result.ruff_summary:
+            notes.append(f"Ruff: {result.ruff_summary}")
+    else:
+        row.append("—")
+
     row.extend(["❌ FAIL", "; ".join(notes)])
     table.add_row(*row, style="red")
 
@@ -492,9 +558,7 @@ def _add_result_row(table: Table, result: ValidationResult, agent: str) -> None:
 def _prune_docker(console: Console) -> None:
     """Run docker cleanup to free disk space."""
     if shutil.which("docker") is None:
-        console.print(
-            "[yellow]Skipping docker prune (docker binary not found in PATH).[/yellow]"
-        )
+        console.print("[yellow]Skipping docker prune (docker binary not found in PATH).[/yellow]")
         return
 
     console.print(
@@ -521,3 +585,54 @@ def _prune_docker(console: Console) -> None:
         console.print("[yellow]Docker cleanup timed out after 10 minutes[/yellow]")
     except Exception as e:
         console.print(f"[yellow]Docker cleanup failed: {e}[/yellow]")
+
+
+def _run_ruff_check(task_dir: Path) -> tuple[bool | None, str | None]:
+    """Run `ruff check` on the task directory (best-effort)."""
+    cmd: list[str]
+    if shutil.which("ruff") is not None:
+        cmd = ["ruff"]
+    else:
+        cmd = [sys.executable, "-m", "ruff"]
+
+    try:
+        try:
+            path_arg = str(task_dir.relative_to(Path.cwd()))
+        except ValueError:
+            path_arg = str(task_dir)
+
+        proc = subprocess.run(
+            cmd + ["check", path_arg],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None, None
+
+    output = (proc.stdout or "") + (proc.stderr or "")
+    output = _strip_ansi(output)
+    if proc.returncode != 0 and "No module named ruff" in output:
+        return None, None
+    return proc.returncode == 0, output or None
+
+
+def _ruff_summary(output: str | None) -> str:
+    """Compact single-line summary for ruff output."""
+    if not output:
+        return ""
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("Found ") and "error" in line:
+            return line
+    if lines:
+        return lines[-1]
+    return ""
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI color escape sequences from text."""
+    return _ANSI_ESCAPE_RE.sub("", text)
