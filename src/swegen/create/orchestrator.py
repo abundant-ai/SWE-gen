@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 
@@ -35,6 +36,13 @@ class MissingIssueError(Exception):
     pass
 
 
+def _slugify_task_name(name: str) -> str:
+    """Normalize task name to a safe, lowercase dash-separated slug."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (name or "").lower())
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
+    return slug
+
+
 class PRToHarborPipeline:
     """Orchestrates the conversion of a GitHub PR into a Harbor-compatible task."""
 
@@ -52,8 +60,8 @@ class PRToHarborPipeline:
         self.pr_number = pr_number
         # Lowercase repo name for task_id (used in Docker image names which must be lowercase)
         # Format: owner__repo-number (SWEBench convention)
-        repo_slug = self.repo.lower().replace("/", "__")
-        self.task_id = f"{repo_slug}-{pr_number}"
+        self.repo_slug = self.repo.lower().replace("/", "__")
+        self.task_id = f"{self.repo_slug}-{pr_number}"
 
     def create_task_scaffold(self, tasks_root: Path, overwrite: bool = False) -> Path:
         """
@@ -98,6 +106,7 @@ class PRToHarborPipeline:
         min_source_files: int = 3,
         max_source_files: int = 10,
         environment: str = "docker",
+        generate_task_name: bool = False,
     ) -> tuple[Path, ClaudeCodeResult | None, list[str], TaskReference | None]:
         """
         Generate a Harbor task using skeleton + Claude Code.
@@ -193,12 +202,8 @@ class PRToHarborPipeline:
             )
         logger.info("Repo at: %s", repo_path)
 
-        # Step 5: Create task scaffold
+        # Step 5: Create task scaffold (initially with default task_id)
         task_dir = self.create_task_scaffold(tasks_root, overwrite=overwrite)
-        paths = TaskPaths(task_dir)
-        paths.environment_dir.mkdir(exist_ok=True)
-        paths.solution_dir.mkdir(exist_ok=True)
-        paths.tests_dir.mkdir(exist_ok=True)
 
         try:
             # Step 6: Try to get reference to previous successful task
@@ -255,6 +260,7 @@ class PRToHarborPipeline:
                     linked_issues=linked_issues,
                     force_generate_instruction=(not require_minimum_difficulty),
                     test_contents=test_contents,
+                    generate_task_name=generate_task_name,
                 )
 
                 if not combined_result.is_substantial:
@@ -269,6 +275,34 @@ class PRToHarborPipeline:
                             "PR deemed trivial by LLM, but proceeding anyway: %s",
                             combined_result.reason,
                         )
+
+                # Update task_id if a semantic name was requested/provided
+                if generate_task_name and combined_result.task_name:
+                    slug = _slugify_task_name(combined_result.task_name)
+                    if slug:
+                        new_task_id = f"{self.repo_slug}-{slug}"
+                        if new_task_id != self.task_id:
+                            new_task_dir = tasks_root / new_task_id
+                            if new_task_dir.exists():
+                                if overwrite:
+                                    shutil.rmtree(new_task_dir)
+                                else:
+                                    raise FileExistsError(
+                                        f"Task already exists: {new_task_dir}\nUse --force to overwrite."
+                                    )
+                            task_dir = task_dir.rename(new_task_dir)
+                            self.task_id = new_task_id
+                            logger.info("Using generated task name: %s", self.task_id)
+                    else:
+                        logger.warning(
+                            "Generated task name was empty after sanitization; using PR number."
+                        )
+
+                # Ensure task directories exist after potential rename
+                paths = TaskPaths(task_dir)
+                paths.environment_dir.mkdir(exist_ok=True)
+                paths.solution_dir.mkdir(exist_ok=True)
+                paths.tests_dir.mkdir(exist_ok=True)
 
                 instruction_data = {
                     "instruction": combined_result.instruction,

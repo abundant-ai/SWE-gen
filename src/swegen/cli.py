@@ -79,6 +79,11 @@ def create_cmd(
         help="Maximum number of source files to avoid large refactors (tests excluded)",
         show_default=True,
     ),
+    generate_name: bool = typer.Option(
+        False,
+        "--generate-name",
+        help="Generate a semantic task name (owner__repo-name) instead of using PR number",
+    ),
     require_issue: bool = typer.Option(
         True,
         help="Require PR to have a linked issue (higher quality instructions); --no-require-issue uses PR body/title instead",
@@ -112,6 +117,7 @@ def create_cmd(
         require_issue=require_issue,
         allow_unmerged=allow_unmerged,
         environment=EnvironmentType(environment),
+        generate_name=generate_name,
         verbose=verbose,
         quiet=quiet,
     )
