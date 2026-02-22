@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/abundant-ai/swe-gen">
-    <img src="swe-gen-wide.png" style="height: 10em" alt="SWE-gen llama genie" />
+    <img src="assets/swe-gen-wide.png" style="height: 10em" alt="SWE-gen llama genie" />
   </a>
 </p>
 
@@ -245,25 +245,25 @@ The pipeline uses a **language-agnostic approach**:
 
 <p>
   <a href="https://github.com/abundant-ai/SWE-gen-JS">
-    <img src="https://raw.githubusercontent.com/abundant-ai/SWE-gen-JS/main/assets/swegen-js-banner.jpg" width="400" alt="SWE-gen-JS" />
+    <img src="assets/swegen-js-banner.jpg" width="400" alt="SWE-gen-JS" />
   </a>&nbsp;&nbsp;
   <a href="https://github.com/abundant-ai/SWE-gen-Java">
-    <img src="https://raw.githubusercontent.com/abundant-ai/SWE-gen-Java/main/assets/swegen-java-banner.jpg" width="400" alt="SWE-gen-Java" />
+    <img src="assets/swegen-java-banner.jpg" width="400" alt="SWE-gen-Java" />
   </a>
 </p>
-<!-- <p>
+<p>
   <a href="https://github.com/abundant-ai/SWE-gen-Go">
-    <img src="https://raw.githubusercontent.com/abundant-ai/SWE-gen-Go/main/assets/swegen-go-banner.jpg" width="400" alt="SWE-gen-Go" />
+    <img src="assets/swegen-go-banner.jpg" width="400" alt="SWE-gen-Go" />
   </a>&nbsp;&nbsp;
   <a href="https://github.com/abundant-ai/SWE-gen-Rust">
-    <img src="https://raw.githubusercontent.com/abundant-ai/SWE-gen-Rust/main/assets/swegen-rust-banner.jpg" width="400" alt="SWE-gen-Rust" />
+    <img src="assets/swegen-rust-banner.jpg" width="400" alt="SWE-gen-Rust" />
   </a>
 </p>
 <p>
   <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
-    <img src="https://raw.githubusercontent.com/abundant-ai/SWE-gen-Cpp/main/assets/swegen-cpp-banner.jpg" width="400" alt="SWE-gen-Cpp" />
+    <img src="assets/swegen-cpp-banner.jpg" width="400" alt="SWE-gen-Cpp" />
   </a>
-</p> -->
+</p>
 
 ## License
 
