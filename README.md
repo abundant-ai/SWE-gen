@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://github.com/abundant-ai/swe-gen">
-    <img src="swe-gen-wide.png" style="height: 10em" alt="SWE-gen llama genie" />
+    <img src="assets/swe-gen-wide.png" style="height: 10em" alt="SWE-gen llama genie" />
   </a>
 </p>
 
@@ -28,6 +28,7 @@ Each task reverses a merged PR to recreate the buggy state, verifies tests fail 
 
 ## News
 
+- [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)** released: 1,000 JVM tasks!
 - [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
 
 ## Quick Start
@@ -239,6 +240,30 @@ The pipeline uses a **language-agnostic approach**:
 - PR evaluation uses LLM to check substantiality and generate instructions
 
 </details>
+
+## Datasets
+
+<p>
+  <a href="https://github.com/abundant-ai/SWE-gen-JS">
+    <img src="assets/swegen-js-banner.jpg" width="400" alt="SWE-gen-JS" />
+  </a>&nbsp;&nbsp;
+  <a href="https://github.com/abundant-ai/SWE-gen-Java">
+    <img src="assets/swegen-java-banner.jpg" width="400" alt="SWE-gen-Java" />
+  </a>
+</p>
+<!-- <p>
+  <a href="https://github.com/abundant-ai/SWE-gen-Go">
+    <img src="assets/swegen-go-banner.jpg" width="400" alt="SWE-gen-Go" />
+  </a>&nbsp;&nbsp;
+  <a href="https://github.com/abundant-ai/SWE-gen-Rust">
+    <img src="assets/swegen-rust-banner.jpg" width="400" alt="SWE-gen-Rust" />
+  </a>
+</p>
+<p>
+  <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
+    <img src="assets/swegen-cpp-banner.jpg" width="400" alt="SWE-gen-Cpp" />
+  </a>
+</p> -->
 
 ## License
 
