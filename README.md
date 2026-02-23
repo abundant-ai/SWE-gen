@@ -27,7 +27,7 @@ Automates task creation from real bug fixes in open-source GitHub repos. Works w
 Each task reverses a merged PR to recreate the buggy state, verifies tests fail on baseline, and pass after applying the fix. Fully containerized with all dependencies installed at build time.
 
 ## News
-
+- [02/2026] ⚙️ **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)** released: 1,000 Rust tasks!
 - [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)** released: 1,000 JVM tasks!
 - [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
 
@@ -245,23 +245,23 @@ The pipeline uses a **language-agnostic approach**:
 
 <p>
   <a href="https://github.com/abundant-ai/SWE-gen-JS">
-    <img src="assets/swegen-js-banner.jpg" width="400" alt="SWE-gen-JS" />
+    <img src="assets/swegen-js-banner.jpg" width="400" height="200" alt="SWE-gen-JS" />
   </a>&nbsp;&nbsp;
   <a href="https://github.com/abundant-ai/SWE-gen-Java">
-    <img src="assets/swegen-java-banner.jpg" width="400" alt="SWE-gen-Java" />
-  </a>
-</p>
-<!-- <p>
-  <a href="https://github.com/abundant-ai/SWE-gen-Go">
-    <img src="assets/swegen-go-banner.jpg" width="400" alt="SWE-gen-Go" />
-  </a>&nbsp;&nbsp;
-  <a href="https://github.com/abundant-ai/SWE-gen-Rust">
-    <img src="assets/swegen-rust-banner.jpg" width="400" alt="SWE-gen-Rust" />
+    <img src="assets/swegen-java-banner.jpg" width="400" height="200" alt="SWE-gen-Java" />
   </a>
 </p>
 <p>
+  <a href="https://github.com/abundant-ai/SWE-gen-Rust">
+    <img src="assets/swegen-rust-banner.jpg" width="400" height="200" alt="SWE-gen-Rust" />
+  </a>&nbsp;&nbsp;
+  <!-- <a href="https://github.com/abundant-ai/SWE-gen-Go">
+    <img src="assets/swegen-go-banner.jpg" width="400" height="120" alt="SWE-gen-Go" />
+  </a> -->
+</p>
+<!-- <p>
   <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
-    <img src="assets/swegen-cpp-banner.jpg" width="400" alt="SWE-gen-Cpp" />
+    <img src="assets/swegen-cpp-banner.jpg" width="400" height="120" alt="SWE-gen-Cpp" />
   </a>
 </p> -->
 
