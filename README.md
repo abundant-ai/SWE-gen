@@ -29,7 +29,7 @@ Each task reverses a merged PR to recreate the buggy state, verifies tests fail 
 ## News
 - [02/2026] 🦫 **[SWE-gen-Go](https://github.com/abundant-ai/SWE-gen-Go)**: 1,000 Go tasks!
 - [02/2026] 🦀 **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)**: 1,000 Rust tasks!
-- [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)** released: 1,000 JVM tasks!
+- [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)**: 1,000 JVM tasks!
 - [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
 
 ## Quick Start
@@ -207,18 +207,18 @@ The pipeline uses a **language-agnostic approach**:
 
 <p>
   <a href="https://github.com/abundant-ai/SWE-gen-JS">
-    <img src="assets/swegen-js-banner.jpg" width="400" height="200" alt="SWE-gen-JS" />
+    <img src="assets/swegen-js-banner.jpg" width="340" height="170" alt="SWE-gen-JS" />
   </a>&nbsp;&nbsp;
   <a href="https://github.com/abundant-ai/SWE-gen-Java">
-    <img src="assets/swegen-java-banner.jpg" width="400" height="200" alt="SWE-gen-Java" />
+    <img src="assets/swegen-java-banner.jpg" width="340" height="170" alt="SWE-gen-Java" />
   </a>
 </p>
 <p>
   <a href="https://github.com/abundant-ai/SWE-gen-Rust">
-    <img src="assets/swegen-rust-banner.jpg" width="400" height="200" alt="SWE-gen-Rust" />
+    <img src="assets/swegen-rust-banner.jpg" width="340" height="170" alt="SWE-gen-Rust" />
   </a>&nbsp;&nbsp;
   <a href="https://github.com/abundant-ai/SWE-gen-Go">
-    <img src="assets/swegen-go-banner.jpg" width="400" height="200" alt="SWE-gen-Go" />
+    <img src="assets/swegen-go-banner.jpg" width="340" height="170" alt="SWE-gen-Go" />
   </a>
 </p>
 <!-- <p>
