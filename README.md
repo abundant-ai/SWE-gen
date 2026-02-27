@@ -221,11 +221,11 @@ The pipeline uses a **language-agnostic approach**:
     <img src="assets/swegen-go-banner.jpg" width="340" height="170" alt="SWE-gen-Go" />
   </a>
 </p>
-<!-- <p>
+<p>
   <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
-    <img src="assets/swegen-cpp-banner.jpg" width="400" height="120" alt="SWE-gen-Cpp" />
+    <img src="assets/swegen-cpp-banner.jpg" width="340" height="170" alt="SWE-gen-Cpp" />
   </a>
-</p> -->
+</p>
 
 ## License
 
