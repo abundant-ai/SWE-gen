@@ -27,8 +27,9 @@ Automates task creation from real bug fixes in open-source GitHub repos. Works w
 Each task reverses a merged PR to recreate the buggy state, verifies tests fail on baseline, and pass after applying the fix. Fully containerized with all dependencies installed at build time.
 
 ## News
-- [02/2026] 🦫 **[SWE-gen-Go](https://github.com/abundant-ai/SWE-gen-Go)**: 1,000 Go tasks!
-- [02/2026] 🦀 **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)**: 1,000 Rust tasks!
+<!-- - [03/2026] 🤓 **[SWE-gen-fn](https://github.com/abundant-ai/SWE-gen-fn)**: 1,000 functional programming tasks! -->
+<!-- - [03/2026] 🔋 **[SWE-gen-Cpp](https://github.com/abundant-ai/SWE-gen-Cpp)**: 1,000 C++ tasks! -->
+- [02/2026] 1000 🦀 **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)** and 🦫 **[SWE-gen-Go](https://github.com/abundant-ai/SWE-gen-Go)** tasks!
 - [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)**: 1,000 JVM tasks!
 - [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
 
@@ -224,6 +225,9 @@ The pipeline uses a **language-agnostic approach**:
 <p>
   <a href="https://github.com/abundant-ai/SWE-gen-Cpp">
     <img src="assets/swegen-cpp-banner.jpg" width="340" height="170" alt="SWE-gen-Cpp" />
+  </a>&nbsp;&nbsp;
+  <a href="https://github.com/abundant-ai/SWE-gen-FN">
+    <img src="assets/swegen-fn-banner.jpg" width="340" height="170" alt="SWE-gen-FN" />
   </a>
 </p>
 
