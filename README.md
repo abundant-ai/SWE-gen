@@ -32,6 +32,7 @@ Each task reverses a merged PR to recreate the buggy state, verifies tests fail 
 - [02/2026] 1000 🦀 **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)** and 🦫 **[SWE-gen-Go](https://github.com/abundant-ai/SWE-gen-Go)** tasks!
 - [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)**: 1,000 JVM tasks!
 - [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
+- [01/2026] 📖 **[blog post](https://www.rishidesai.org/posts/swe-gen/)** is out!
 
 ## Quick Start
 
