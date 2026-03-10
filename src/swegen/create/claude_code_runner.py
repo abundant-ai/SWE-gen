@@ -442,53 +442,73 @@ Based on your analysis, edit the Dockerfile and test.sh.
 - **NEVER** use language-specific base images (node:XX, python:XX, golang:XX)
 - Install language runtimes via apt-get or official installers
 
+**CRITICAL: Dockerfile Layer Organization**
+
+Use TWO organized layers for clarity:
+
+1. **Layer 1: Base packages** (skeleton provides this) - git, curl, ca-certificates, patch, build-essential
+2. **Layer 2: Language runtime** - Python/Node/Ruby/etc. specific packages
+
+Each layer follows this pattern:
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    package1 package2 \\
+    && rm -rf /var/lib/apt/lists/*
+```
+
+**Rules:**
+- Each RUN layer with apt-get should have exactly ONE `apt-get update` at the start
+- Each RUN layer with apt-get should have exactly ONE `rm -rf /var/lib/apt/lists/*` at the end
+- Combine related operations (symlinks, tool installs) within the same layer
+
+**Formatting Requirements:**
+- Always include a space before `\\` in multi-line commands: `--no-install-recommends \\` (not `--no-install-recommends\\`)
+- Use `--no-install-recommends` to prevent installation of non-essential packages
+
 **Language Runtime Installation Examples:**
 
 **Python (PREFER uv for speed):**
+
+FIRST: Check `.python-version` or `pyproject.toml` for required Python version.
+
 ```dockerfile
-# Install Python and uv (much faster than pip)
-RUN apt-get update && apt-get install -y \\
+# If default Ubuntu python3 is sufficient:
+RUN apt-get update && apt-get install -y --no-install-recommends \\
     python3 python3-pip python3-venv python3-dev \\
+    && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh \\
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv for fast package management
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \\
-    mv /root/.local/bin/uv /usr/local/bin/uv
+# If specific version needed (e.g., 3.12, 3.13 from .python-version), use deadsnakes PPA:
+# NOTE: software-properties-common is already in base packages
+RUN add-apt-repository -y ppa:deadsnakes/ppa \\
+    && apt-get update && apt-get install -y --no-install-recommends \\
+    python3.X python3.X-dev python3.X-venv \\
+    && ln -sf /usr/bin/python3.X /usr/bin/python3 \\
+    && ln -sf /usr/bin/python3.X /usr/bin/python \\
+    && curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh \\
+    && rm -rf /var/lib/apt/lists/*
+# Replace 3.X with actual version from .python-version or pyproject.toml
 ```
 
 **Node.js (check .nvmrc or package.json engines for version!):**
+
+FIRST: Check `.nvmrc`, `.node-version`, or `package.json` "engines.node" for required version.
+
 ```dockerfile
-# Check .nvmrc, .node-version, or package.json "engines.node" for required version
-# Default to Node 20 if not specified
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \\
-    apt-get install -y nodejs && \\
-    rm -rf /var/lib/apt/lists/*
+# Install Node.js (replace XX with version from project, default to 20 if not specified)
+RUN curl -fsSL https://deb.nodesource.com/setup_XX.x | bash - \\
+    && apt-get install -y --no-install-recommends nodejs \\
+    && corepack enable \\
+    && rm -rf /var/lib/apt/lists/*
 
 # Package manager setup - detect from lock file:
-#   pnpm-lock.yaml → pnpm
-#   yarn.lock → yarn
-#   bun.lockb → bun
-#   package-lock.json or none → npm
+#   pnpm-lock.yaml → add: && corepack prepare pnpm@latest --activate
+#   yarn.lock → corepack enable is sufficient
+#   bun.lockb → add: && curl -fsSL https://bun.sh/install | bash && ln -s /root/.bun/bin/bun /usr/local/bin/bun
+#   package-lock.json or none → npm is included with Node.js (no extra setup)
 
-# For pnpm:
-RUN corepack enable && corepack prepare pnpm@latest --activate
-
-# For yarn (classic or berry):
-RUN corepack enable
-
-# For bun:
-RUN curl -fsSL https://bun.sh/install | bash && ln -s /root/.bun/bin/bun /usr/local/bin/bun
-
-# npm is included with Node.js (no extra setup needed)
-```
-
-**Node.js native dependencies (node-gyp):**
-```dockerfile
-# Many npm packages need native compilation (node-gyp)
-# Add these if you see gyp errors during npm install:
-RUN apt-get update && apt-get install -y \\
-    python3 make g++ \\
-    && rm -rf /var/lib/apt/lists/*
+# If native compilation needed (node-gyp errors), add to base packages layer:
+#   python3 make g++
 ```
 
 **Go:**
@@ -505,15 +525,19 @@ ENV PATH="/root/.cargo/bin:${{PATH}}"
 
 **Ruby:**
 ```dockerfile
-RUN apt-get update && apt-get install -y ruby ruby-dev && \\
-    rm -rf /var/lib/apt/lists/*
-RUN gem install bundler
+# Install Ruby runtime (separate layer from base packages)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    ruby ruby-dev \\
+    && gem install bundler \\
+    && rm -rf /var/lib/apt/lists/*
 ```
 
 **Java:**
 ```dockerfile
-RUN apt-get update && apt-get install -y openjdk-17-jdk maven && \\
-    rm -rf /var/lib/apt/lists/*
+# Install JDK and Maven (separate layer from base packages)
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    openjdk-17-jdk maven \\
+    && rm -rf /var/lib/apt/lists/*
 ```
 
 **Dependency Installation Examples:**
