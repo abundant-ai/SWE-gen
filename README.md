@@ -28,8 +28,8 @@ Each task reverses a merged PR to recreate the buggy state, verifies tests fail 
 
 ## News
 <!-- - [03/2026] 🤓 **[SWE-gen-fn](https://github.com/abundant-ai/SWE-gen-fn)**: 1,000 functional programming tasks! -->
-<!-- - [03/2026] 🔋 **[SWE-gen-Cpp](https://github.com/abundant-ai/SWE-gen-Cpp)**: 1,000 C++ tasks! -->
-- [02/2026] 1000 🦀 **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)** and 🦫 **[SWE-gen-Go](https://github.com/abundant-ai/SWE-gen-Go)** tasks!
+- [03/2026] ☁️ Run Harbor tasks on the cloud with [oddish](https://github.com/abundant-ai/oddish)!
+- [02/2026] 🦀 **[SWE-gen-Rust](https://github.com/abundant-ai/SWE-gen-Rust)**, **[SWE-gen-Go](https://github.com/abundant-ai/SWE-gen-Go)**, and **[SWE-gen-Cpp](https://github.com/abundant-ai/SWE-gen-Cpp)** released!
 - [02/2026] ☕ **[SWE-gen-Java](https://github.com/abundant-ai/SWE-gen-Java)**: 1,000 JVM tasks!
 - [01/2026] 🔥 **[SWE-gen-JS](https://github.com/abundant-ai/SWE-gen-JS)** released: 1,000 JS/TS task dataset generated with SWE-gen
 - [01/2026] 📖 **[blog post](https://www.rishidesai.org/posts/swe-gen/)** is out!
