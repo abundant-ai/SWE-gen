@@ -31,6 +31,9 @@ class CreateConfig:
         allow_unmerged: Allow processing unmerged PRs (for testing/preview, default: False)
         environment: Environment type for Harbor runs (docker, daytona, e2b, modal, runloop, gke)
         generate_name: Generate semantic task name instead of PR number
+        enforce_text_only_assets: Require instruction.md to be plain text (no images/diagrams/PDFs
+            the agent must view), so the task is solvable by a non-multimodal model. Test files are
+            exempt (held out from the agent). Disable with --allow-non-text-assets.
         verbose: Increase output verbosity
         quiet: Reduce output verbosity
     """
@@ -50,6 +53,7 @@ class CreateConfig:
     allow_unmerged: bool = False
     environment: EnvironmentType = EnvironmentType.DOCKER
     generate_name: bool = False
+    enforce_text_only_assets: bool = True
     verbose: bool = False
     quiet: bool = False
 
@@ -90,6 +94,8 @@ class FarmConfig:
         verbose: Enable verbose output
         require_issue: Require PR to have a linked issue (higher quality instructions)
         validate: Run Harbor validation after CC (useful when CC times out but task may be valid)
+        enforce_text_only_assets: Require instruction.md to be plain text (see CreateConfig).
+            Disable with --allow-non-text-assets.
     """
 
     repo: str
@@ -113,6 +119,7 @@ class FarmConfig:
     verbose: bool = False
     require_issue: bool = True
     validate: bool = True
+    enforce_text_only_assets: bool = True
 
 
 @dataclass(frozen=True)

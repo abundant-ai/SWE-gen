@@ -79,6 +79,15 @@ Instead, write as if describing the problem from a user/issue perspective:
 
 The agent solving this task will NOT see the test files, so any reference to them will be confusing.
 
+TEXT-ONLY (IMPORTANT):
+The instruction must be PLAIN TEXT, solvable by a non-multimodal model. Do NOT include or rely on
+images, screenshots, diagrams, charts, PDFs, or other visual/binary assets:
+✗ No markdown image embeds `![...](...)`, `<img>`/`<svg>` tags, or `data:` URIs
+✗ No links to image/PDF/video files (e.g. .png, .jpg, .svg, .pdf)
+✗ No "see the screenshot/diagram/figure/attached image" — the agent cannot view it
+If the issue/PR conveys information via an image or diagram, describe that information in words
+(e.g. the error text, the expected layout, the values) instead of referencing the visual.
+
 WHAT TO INCLUDE:
 ✓ Problem description from issue/PR
 ✓ Expected behavior vs actual behavior

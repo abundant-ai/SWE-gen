@@ -218,6 +218,7 @@ def _run_reversal_for_pr_impl(
         max_source_files=config.max_source_files,
         require_issue=config.require_issue,
         environment=config.environment,
+        enforce_text_only_assets=config.enforce_text_only_assets,
     )
 
     # Capture any errors from the pipeline

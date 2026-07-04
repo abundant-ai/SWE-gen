@@ -92,6 +92,12 @@ def create_cmd(
         False,
         help="Allow processing unmerged PRs (for testing/preview); --allow-unmerged to enable",
     ),
+    enforce_text_only_assets: bool = typer.Option(
+        True,
+        "--text-only-assets/--allow-non-text-assets",
+        help="Require instruction.md to be plain text (no images/diagrams/PDFs to view), so the "
+        "task is solvable by a non-multimodal model; --allow-non-text-assets to disable",
+    ),
     environment: str = typer.Option(
         "docker",
         "-e",
@@ -118,6 +124,7 @@ def create_cmd(
         allow_unmerged=allow_unmerged,
         environment=EnvironmentType(environment),
         generate_name=generate_name,
+        enforce_text_only_assets=enforce_text_only_assets,
         verbose=verbose,
         quiet=quiet,
     )
@@ -174,6 +181,12 @@ def validate(
         help="Run docker cleanup after every N tasks (0 to disable, local docker only)",
         show_default=True,
     ),
+    enforce_text_only_assets: bool = typer.Option(
+        True,
+        "--text-only-assets/--allow-non-text-assets",
+        help="Fail tasks whose instruction.md references images/diagrams/PDFs (text-only policy); "
+        "--allow-non-text-assets to disable",
+    ),
 ) -> None:
     if agent not in ("both", "nop", "oracle"):
         raise typer.BadParameter("agent must be one of: both, nop, oracle")
@@ -191,6 +204,7 @@ def validate(
             show_passed=show_passed,
             output_file=output,
             docker_prune_batch=docker_prune_batch,
+            enforce_text_only_assets=enforce_text_only_assets,
         )
     )
 
@@ -381,6 +395,12 @@ def farm(
     validate: bool = typer.Option(
         True, help="Run Harbor validation after CC; --no-validate to skip"
     ),
+    enforce_text_only_assets: bool = typer.Option(
+        True,
+        "--text-only-assets/--allow-non-text-assets",
+        help="Require instruction.md to be plain text (no images/diagrams/PDFs to view), so the "
+        "task is solvable by a non-multimodal model; --allow-non-text-assets to disable",
+    ),
 ) -> None:
     """
     Continuously process merged GitHub PRs and convert them to Harbor tasks.
@@ -409,6 +429,7 @@ def farm(
         verbose=verbose,
         require_issue=require_issue,
         validate=validate,
+        enforce_text_only_assets=enforce_text_only_assets,
     )
 
     console = Console()

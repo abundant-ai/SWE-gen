@@ -31,6 +31,7 @@ from swegen.tools.harbor_runner import (
     parse_harbor_outcome,
     run_harbor_agent,
 )
+from swegen.tools.policy import find_instruction_text_violations
 
 
 def _setup_claude_auth_preference(console: Console) -> None:
@@ -304,6 +305,10 @@ def _run_quality_check(
                     parts = [p.strip() for p in clean_line.split("│")]
                     if len(parts) >= 2 and any(k in parts[1].lower() for k in ["fail"]):
                         issues.append(parts[0])
+
+    # Text-only assets policy: instruction.md must be plain text (no images/diagrams/PDFs).
+    for v in find_instruction_text_violations(task_path):
+        issues.append(f"text-only: instruction.md {v.label} (line {v.line_number})")
 
     passed = proc.returncode == 0 and len(issues) == 0
 

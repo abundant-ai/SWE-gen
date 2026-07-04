@@ -18,6 +18,7 @@ from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
 from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
+from swegen.tools.policy import find_instruction_text_violations, format_text_only_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
@@ -639,6 +640,24 @@ def run_reversal(config: CreateConfig) -> None:
         _handle_validation_failure(
             console, harbor_validation_failed, cc_validation_failed, harbor_actually_ran
         )
+
+        # Text-only assets policy gate: instruction.md must be plain text (no images/diagrams/PDFs
+        # to view), so the task is solvable by a non-multimodal model.
+        if config.enforce_text_only_assets:
+            text_violations = find_instruction_text_violations(task_dir)
+            if text_violations:
+                console.print()
+                console.print(
+                    Panel(
+                        Text(format_text_only_violations(task_dir, text_violations), style="red"),
+                        title="[red]Text-Only Assets Policy Violation[/red]",
+                        border_style="red",
+                    )
+                )
+                raise ValidationError(
+                    "instruction.md references images/diagrams/PDFs (text-only policy). "
+                    "Rewrite the instruction to convey all information as text."
+                )
 
         # Save state record (non-fatal if fails)
         _save_state_record(

@@ -14,6 +14,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn
 from rich.table import Table
 
 from .harbor_runner import parse_harbor_outcome, run_harbor_agent
+from .policy import find_instruction_text_violations, format_text_only_violations
 
 DOCKER_CLEANUP_CMD = "docker system prune -af"
 
@@ -32,6 +33,7 @@ class ValidateArgs:
     show_passed: bool = False
     output_file: Path | None = None  # Write results to file as they complete
     docker_prune_batch: int = 5  # Run docker cleanup after every N tasks (0 to disable)
+    enforce_text_only_assets: bool = True  # Fail tasks whose instruction.md references images/PDFs
 
 
 @dataclass
@@ -98,6 +100,14 @@ def _run_single_mode(args: ValidateArgs, dataset_path: Path, task_id: str, task_
     """Validate a single task with traditional output."""
     jobs_dir = args.jobs_dir.resolve()
     jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Text-only assets policy gate (fail fast before spinning up Docker).
+    if args.enforce_text_only_assets:
+        violations = find_instruction_text_violations(task_dir)
+        if violations:
+            print("\n[validate] FAILED: text-only assets policy violation")
+            print(format_text_only_violations(task_dir, violations))
+            sys.exit(1)
 
     # Run regular validation
     print("[validate] Running regular validation...")
@@ -202,6 +212,7 @@ def _run_batch_mode(args: ValidateArgs, dataset_path: Path) -> None:
             console,
             args.output_file,
             args.docker_prune_batch,
+            args.enforce_text_only_assets,
         )
     )
 
@@ -224,6 +235,7 @@ async def _validate_batch(
     console: Console,
     output_file: Path | None = None,
     docker_prune_batch: int = 5,
+    enforce_text_only_assets: bool = True,
 ) -> list[ValidationResult]:
     """Run validations in parallel with progress bar."""
     semaphore = asyncio.Semaphore(max_parallel)
@@ -255,6 +267,20 @@ async def _validate_batch(
     async def validate_one(task_dir: Path) -> ValidationResult:
         async with semaphore:
             try:
+                # Text-only assets policy gate (static, no Docker needed).
+                if enforce_text_only_assets and find_instruction_text_violations(task_dir):
+                    result = ValidationResult(
+                        task_id=task_dir.name,
+                        nop_reward=None,
+                        oracle_reward=None,
+                        nop_exit_code=-1,
+                        oracle_exit_code=-1,
+                        passed=False,
+                        error="text-only policy: instruction.md references images/diagrams/PDFs",
+                    )
+                    await write_result(result)
+                    return result
+
                 nop_reward = oracle_reward = None
                 nop_code = oracle_code = 0
 
