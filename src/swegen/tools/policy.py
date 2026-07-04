@@ -155,14 +155,21 @@ def _main(argv: list[str]) -> int:
                 d for d in sorted(p.iterdir()) if (d / "tests" / "test.sh").exists()
             )
 
+    # No resolvable tasks almost always means a wrong/empty path argument; exit non-zero
+    # (distinct from the violation code) so pre-commit/CI don't treat it as a passing scan.
+    if not task_dirs:
+        print(
+            "policy: no tasks with tests/test.sh found in given paths (check the path)",
+            file=sys.stderr,
+        )
+        return 2
+
     had_violation = False
     for task_dir in task_dirs:
         violations = find_test_network_violations(task_dir)
         if violations:
             had_violation = True
             print(format_violations(task_dir, violations), file=sys.stderr)
-    if not task_dirs:
-        print("policy: no tasks with tests/test.sh found in given paths", file=sys.stderr)
     return 1 if had_violation else 0
 
 
