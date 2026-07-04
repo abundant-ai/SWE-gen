@@ -99,6 +99,12 @@ Look for what the reference added beyond the basic skeleton:
 - Build steps
 - Post-patch rebuild steps
 
+**Dependency pinning:** pin language deps via lock files (`npm ci`,
+`--frozen-lockfile`, uv/pip with the lock, `cargo fetch`, `go mod download`,
+`bundle install`), but do NOT pin apt/system package versions
+(`apt-get install -y pkg`, never `pkg=1.2.3`) — Ubuntu/Debian purge old versions,
+so pinned apt installs break future rebuilds and a CI check rejects them.
+
 ### Step 2: Fill In Your Skeleton's TODOs
 
 **CRITICAL: Always use Ubuntu base image**
@@ -536,6 +542,20 @@ RUN apt-get update && apt-get install -y openjdk-17-jdk maven && \\
 - **Rust:** `cargo fetch`
 - **Ruby:** `bundle install`
 - **Java:** `mvn dependency:resolve`
+
+**Dependency Pinning Policy (reproducibility WITHOUT breaking future builds):**
+
+- **DO pin language/package-manager dependencies via lock files.** Their registries
+  (PyPI, npm, crates.io, RubyGems, Maven Central, Go module proxy) keep old versions
+  indefinitely, so pinned installs stay reproducible AND keep building over time:
+  `npm ci`, `yarn/pnpm install --frozen-lockfile`, uv/pip against the lock or a pinned
+  `requirements.txt`, `cargo fetch` (Cargo.lock), `go mod download` (go.sum),
+  `bundle install` (Gemfile.lock).
+- **Do NOT pin apt / system package versions** (e.g. `apt-get install -y libfoo=1.2.3`).
+  Ubuntu/Debian keep only the current version of each package in a release pocket and
+  purge older ones, so a pinned `apt` version stops resolving after the next archive
+  update and the task can no longer build. Install apt packages UNPINNED:
+  `apt-get install -y libfoo`. (A CI check rejects Dockerfiles that pin apt versions.)
 
 **Build Steps (for compiled languages):**
 
