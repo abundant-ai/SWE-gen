@@ -278,6 +278,12 @@ def analyze(
         help="OpenAI model for verdict synthesis",
         show_default=True,
     ),
+    enforce_text_only_assets: bool = typer.Option(
+        True,
+        "--text-only-assets/--allow-non-text-assets",
+        help="Flag instruction.md images/diagrams/PDFs in the quality check; "
+        "--allow-non-text-assets to disable",
+    ),
 ) -> None:
     """
     Analyze a Harbor task to determine if it's well-specified.
@@ -326,6 +332,7 @@ def analyze(
             verbose=verbose,
             classification_timeout=classification_timeout,
             verdict_timeout=verdict_timeout,
+            enforce_text_only_assets=enforce_text_only_assets,
         )
     )
 

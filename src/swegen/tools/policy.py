@@ -35,8 +35,10 @@ _TEXT_ONLY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"!\[[^\]]*\]\([^)]*\)"), "markdown image embed"),
     # HTML <img> / <picture> / <svg> / <video> / <embed> / <object>
     (re.compile(r"<\s*(img|picture|svg|video|embed|object)\b", re.IGNORECASE), "HTML visual element"),
-    # data: URI carrying an image/pdf/binary payload
-    (re.compile(r"data:(?:image|application|video)/[^;\s)]+;base64", re.IGNORECASE), "embedded data: URI"),
+    # data: URI carrying an embedded image, video, or PDF payload. Note: application/* is
+    # restricted to PDF so text MIME types (application/json, application/xml, ...) don't match.
+    (re.compile(r"data:(?:image/[^;,\s]+|video/[^;,\s]+|application/pdf);base64", re.IGNORECASE),
+     "embedded image/video/pdf data URI"),
     # Markdown link whose target is a visual/binary asset: [txt](foo.png)
     (re.compile(rf"\]\(\s*[^)\s]+\.(?:{_EXT_ALT})\b", re.IGNORECASE), "link to a visual/binary asset"),
     # Bare URL ending in a visual/binary asset extension
@@ -111,14 +113,21 @@ def _main(argv: list[str]) -> int:
                 d for d in sorted(p.iterdir()) if (d / "instruction.md").exists()
             )
 
+    # No resolvable tasks almost always means a wrong/empty path argument; exit non-zero
+    # (distinct from the violation code) so pre-commit/CI don't treat it as a passing scan.
+    if not task_dirs:
+        print(
+            "policy: no tasks with instruction.md found in given paths (check the path)",
+            file=sys.stderr,
+        )
+        return 2
+
     had_violation = False
     for task_dir in task_dirs:
         violations = find_instruction_text_violations(task_dir)
         if violations:
             had_violation = True
             print(format_text_only_violations(task_dir, violations), file=sys.stderr)
-    if not task_dirs:
-        print("policy: no tasks with instruction.md found in given paths", file=sys.stderr)
     return 1 if had_violation else 0
 
 
