@@ -18,6 +18,7 @@ from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
 from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
+from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
@@ -491,6 +492,7 @@ def run_reversal(config: CreateConfig) -> None:
                     max_source_files=config.max_source_files,
                     environment=config.environment.value,
                     generate_task_name=config.generate_name,
+                    enforce_offline_tests=config.enforce_offline_tests,
                 )
 
             skeleton_secs = time.perf_counter() - t0
@@ -534,6 +536,7 @@ def run_reversal(config: CreateConfig) -> None:
                 reference_pr=task_reference.pr_number if task_reference else None,
                 head_sha=metadata.get("head_sha"),
                 environment=config.environment.value,
+                enforce_offline_tests=config.enforce_offline_tests,
             )
 
             gen_secs = time.perf_counter() - t0
@@ -577,6 +580,27 @@ def run_reversal(config: CreateConfig) -> None:
 
         # Task ID from generated dir
         task_id = task_dir.name
+
+        # Offline-tests policy gate: tests/test.sh must not install deps or hit the network
+        # (deps belong in the Dockerfile; the verifier runs with no network). Run this BEFORE
+        # Harbor validation so we (a) fail fast without spinning up Docker, and (b) always report
+        # the violation even when NOP/Oracle or CC checks would otherwise fail first.
+        if config.enforce_offline_tests:
+            offline_violations = find_test_network_violations(task_dir)
+            if offline_violations:
+                console.print()
+                console.print(
+                    Panel(
+                        Text(format_violations(task_dir, offline_violations), style="red"),
+                        title="[red]Offline Tests Policy Violation[/red]",
+                        border_style="red",
+                    )
+                )
+                raise ValidationError(
+                    "tests/test.sh installs dependencies or accesses the network "
+                    "(offline-tests policy). Move all installs/builds into the Dockerfile."
+                )
+
         harbor_do = not config.no_validate
 
         # If CC already validated successfully, skip harbor validation

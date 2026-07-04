@@ -31,6 +31,10 @@ class CreateConfig:
         allow_unmerged: Allow processing unmerged PRs (for testing/preview, default: False)
         environment: Environment type for Harbor runs (docker, daytona, e2b, modal, runloop, gke)
         generate_name: Generate semantic task name instead of PR number
+        enforce_offline_tests: Forbid runtime dependency installs / network access in tests/test.sh.
+            When True (default): CC is told not to install/network in test.sh, a static gate hard-fails
+            any test.sh that does, and the generated task.toml sets [environment].allow_internet=false
+            (internet is available only during the Docker build). Disable with --allow-test-network.
         verbose: Increase output verbosity
         quiet: Reduce output verbosity
     """
@@ -50,6 +54,7 @@ class CreateConfig:
     allow_unmerged: bool = False
     environment: EnvironmentType = EnvironmentType.DOCKER
     generate_name: bool = False
+    enforce_offline_tests: bool = True
     verbose: bool = False
     quiet: bool = False
 
@@ -90,6 +95,8 @@ class FarmConfig:
         verbose: Enable verbose output
         require_issue: Require PR to have a linked issue (higher quality instructions)
         validate: Run Harbor validation after CC (useful when CC times out but task may be valid)
+        enforce_offline_tests: Forbid runtime dependency installs / network access in tests/test.sh
+            (see CreateConfig). Disable with --allow-test-network.
     """
 
     repo: str
@@ -113,6 +120,7 @@ class FarmConfig:
     verbose: bool = False
     require_issue: bool = True
     validate: bool = True
+    enforce_offline_tests: bool = True
 
 
 @dataclass(frozen=True)

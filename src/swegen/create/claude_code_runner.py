@@ -29,6 +29,34 @@ class ClaudeCodeResult:
     cc_output: str | None = None
 
 
+# Appended to the CC prompt when offline-tests enforcement is on. The generated
+# task.toml sets allow_internet=false, so the verifier container has no network;
+# a static gate also hard-fails any test.sh that installs/fetches at test time.
+TEST_OFFLINE_CONSTRAINT = """
+## HARD CONSTRAINT: tests/test.sh must be fully offline
+
+The verifier runs with **no network access** (task.toml sets `allow_internet = false`).
+Internet is available **only during the Docker image build** (the Dockerfile).
+
+Therefore:
+- **All** language runtimes, system packages, project dependencies, and build steps
+  MUST be installed/performed in the **Dockerfile** (build time).
+- `tests/test.sh` MUST NOT install anything or touch the network. Do NOT put any of
+  these in test.sh: `pip/uv/poetry/pipenv install`, `npm/yarn/pnpm/bun install`,
+  `apt-get/apk/yum install`, `go get`/`go mod download`, `cargo fetch/install`,
+  `gem install`, `bundle install`, `corepack prepare`, `curl`/`wget`, or
+  `git clone/fetch/pull`.
+- test.sh should only: set env vars, copy the held-out test files, and run the test
+  command (e.g. `pytest ...`, `go test ...`, `cargo test ...`, `bundle exec rspec ...`,
+  `npx jest ... --coverage=false`). These runners are fine — installers are not.
+- If a test needs a dependency, add it to the **Dockerfile**, not test.sh. If the
+  install/build is only needed after applying bug.patch, do the rebuild in the
+  Dockerfile after the `patch -p1 < bug.patch` step.
+
+A task that installs or fetches over the network in test.sh will be **rejected**.
+"""
+
+
 # The prompt for CC when using a reference task (much simpler task)
 CC_REFERENCE_PROMPT = """
 ## Your Task: Fill In Skeleton Using Reference Task as Example
@@ -720,6 +748,7 @@ def run_claude_code_session(
     reference_pr: int | None = None,
     head_sha: str | None = None,
     environment: str = "docker",
+    enforce_offline_tests: bool = True,
 ) -> ClaudeCodeResult:
     """
     Run Claude Code session to complete skeleton and make harbor pass.
@@ -758,6 +787,7 @@ def run_claude_code_session(
             reference_pr=reference_pr,
             head_sha=head_sha,
             environment=environment,
+            enforce_offline_tests=enforce_offline_tests,
         )
     )
 
@@ -776,6 +806,7 @@ async def _run_claude_code_session_async(
     reference_pr: int | None = None,
     head_sha: str | None = None,
     environment: str = "docker",
+    enforce_offline_tests: bool = True,
 ) -> ClaudeCodeResult:
     """Async implementation of Claude Code session."""
     logger = logging.getLogger("swegen")
@@ -831,6 +862,11 @@ async def _run_claude_code_session_async(
             environment=environment,
         )
         logger.info("Using full prompt (generating from skeleton)")
+
+    # Append the offline-tests hard constraint so CC never puts installs/network
+    # in test.sh (task.toml also enforces this at runtime via allow_internet=false).
+    if enforce_offline_tests:
+        prompt_text = prompt_text + "\n" + TEST_OFFLINE_CONSTRAINT
 
     # Create hook for logging Harbor validation attempts
     harbor_runs: list[str] = []

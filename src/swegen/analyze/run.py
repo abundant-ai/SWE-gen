@@ -31,6 +31,7 @@ from swegen.tools.harbor_runner import (
     parse_harbor_outcome,
     run_harbor_agent,
 )
+from swegen.tools.policy import find_test_network_violations
 
 
 def _setup_claude_auth_preference(console: Console) -> None:
@@ -129,6 +130,7 @@ class AnalyzeArgs:
     timeout_multiplier: float = 1.0
     classification_timeout: int = 300  # Timeout per classification in seconds (5 min default)
     verdict_timeout: int = 180  # Timeout for verdict synthesis in seconds (3 min default)
+    enforce_offline_tests: bool = True  # Flag test.sh installs/network in the quality check
 
 
 def run_analyze(args: AnalyzeArgs) -> AnalysisResult:
@@ -182,7 +184,9 @@ def _run_analysis(
     quality_check = None
     if not args.skip_quality_check:
         console.print("\n[bold blue]Step 1/4: Static Quality Check[/bold blue]")
-        quality_check = _run_quality_check(task_path, args.analysis_model, console)
+        quality_check = _run_quality_check(
+            task_path, args.analysis_model, console, args.enforce_offline_tests
+        )
     else:
         console.print("\n[dim]Step 1/4: Static Quality Check (skipped)[/dim]")
 
@@ -275,6 +279,7 @@ def _run_quality_check(
     task_path: Path,
     model: str,
     console: Console,
+    enforce_offline_tests: bool = True,
 ) -> QualityCheckResult:
     """Run Harbor's static quality check on the task."""
     cmd = harbor_cmd_base() + [
@@ -304,6 +309,12 @@ def _run_quality_check(
                     parts = [p.strip() for p in clean_line.split("│")]
                     if len(parts) >= 2 and any(k in parts[1].lower() for k in ["fail"]):
                         issues.append(parts[0])
+
+    # Offline-tests policy: tests/test.sh must not install deps or access the network.
+    # Respect the same opt-out as create/validate/farm (--allow-test-network).
+    if enforce_offline_tests:
+        for v in find_test_network_violations(task_path):
+            issues.append(f"offline-tests: test.sh {v.label} (line {v.line_number})")
 
     passed = proc.returncode == 0 and len(issues) == 0
 

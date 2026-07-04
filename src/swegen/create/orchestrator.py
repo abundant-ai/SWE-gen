@@ -107,6 +107,7 @@ class PRToHarborPipeline:
         max_source_files: int = 10,
         environment: str = "docker",
         generate_task_name: bool = False,
+        enforce_offline_tests: bool = True,
     ) -> tuple[Path, ClaudeCodeResult | None, list[str], TaskReference | None]:
         """
         Generate a Harbor task using skeleton + Claude Code.
@@ -342,7 +343,9 @@ class PRToHarborPipeline:
 
             # instruction.md and task.toml
             paths.instruction_path.write_text(generate_instruction_md(instruction_data))
-            paths.config_path.write_text(generate_task_toml(instruction_data))
+            paths.config_path.write_text(
+                generate_task_toml(instruction_data, enforce_offline_tests=enforce_offline_tests)
+            )
 
             # solution/fix.patch - the actual fix to apply
             (paths.solution_dir / "fix.patch").write_text(solution_diff)
@@ -380,6 +383,7 @@ class PRToHarborPipeline:
                     reference_pr=task_reference.pr_number if task_reference else None,
                     head_sha=metadata.get("head_sha"),
                     environment=environment,
+                    enforce_offline_tests=enforce_offline_tests,
                 )
 
                 if cc_result.success:
