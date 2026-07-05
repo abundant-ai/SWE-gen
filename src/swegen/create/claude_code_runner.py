@@ -29,6 +29,34 @@ class ClaudeCodeResult:
     cc_output: str | None = None
 
 
+# Appended to the CC prompt when offline-tests enforcement is on. The generated
+# task.toml sets allow_internet=false, so the verifier container has no network;
+# a static gate also hard-fails any test.sh that installs/fetches at test time.
+TEST_OFFLINE_CONSTRAINT = """
+## HARD CONSTRAINT: tests/test.sh must be fully offline
+
+The verifier runs with **no network access** (task.toml sets `allow_internet = false`).
+Internet is available **only during the Docker image build** (the Dockerfile).
+
+Therefore:
+- **All** language runtimes, system packages, project dependencies, and build steps
+  MUST be installed/performed in the **Dockerfile** (build time).
+- `tests/test.sh` MUST NOT install anything or touch the network. Do NOT put any of
+  these in test.sh: `pip/uv/poetry/pipenv install`, `npm/yarn/pnpm/bun install`,
+  `apt-get/apk/yum install`, `go get`/`go mod download`, `cargo fetch/install`,
+  `gem install`, `bundle install`, `corepack prepare`, `curl`/`wget`, or
+  `git clone/fetch/pull`.
+- test.sh should only: set env vars, copy the held-out test files, and run the test
+  command (e.g. `pytest ...`, `go test ...`, `cargo test ...`, `bundle exec rspec ...`,
+  `npx jest ... --coverage=false`). These runners are fine — installers are not.
+- If a test needs a dependency, add it to the **Dockerfile**, not test.sh. If the
+  install/build is only needed after applying bug.patch, do the rebuild in the
+  Dockerfile after the `patch -p1 < bug.patch` step.
+
+A task that installs or fetches over the network in test.sh will be **rejected**.
+"""
+
+
 # The prompt for CC when using a reference task (much simpler task)
 CC_REFERENCE_PROMPT = """
 ## Your Task: Fill In Skeleton Using Reference Task as Example
@@ -98,6 +126,12 @@ Look for what the reference added beyond the basic skeleton:
 - Dependency installation commands
 - Build steps
 - Post-patch rebuild steps
+
+**Dependency pinning:** pin language deps via lock files (`npm ci`,
+`--frozen-lockfile`, uv/pip with the lock, `cargo fetch`, `go mod download`,
+`bundle install`), but do NOT pin apt/system package versions
+(`apt-get install -y pkg`, never `pkg=1.2.3`) — Ubuntu/Debian purge old versions,
+so pinned apt installs break future rebuilds and a CI check rejects them.
 
 ### Step 2: Fill In Your Skeleton's TODOs
 
@@ -537,6 +571,20 @@ RUN apt-get update && apt-get install -y openjdk-17-jdk maven && \\
 - **Ruby:** `bundle install`
 - **Java:** `mvn dependency:resolve`
 
+**Dependency Pinning Policy (reproducibility WITHOUT breaking future builds):**
+
+- **DO pin language/package-manager dependencies via lock files.** Their registries
+  (PyPI, npm, crates.io, RubyGems, Maven Central, Go module proxy) keep old versions
+  indefinitely, so pinned installs stay reproducible AND keep building over time:
+  `npm ci`, `yarn/pnpm install --frozen-lockfile`, uv/pip against the lock or a pinned
+  `requirements.txt`, `cargo fetch` (Cargo.lock), `go mod download` (go.sum),
+  `bundle install` (Gemfile.lock).
+- **Do NOT pin apt / system package versions** (e.g. `apt-get install -y libfoo=1.2.3`).
+  Ubuntu/Debian keep only the current version of each package in a release pocket and
+  purge older ones, so a pinned `apt` version stops resolving after the next archive
+  update and the task can no longer build. Install apt packages UNPINNED:
+  `apt-get install -y libfoo`. (A CI check rejects Dockerfiles that pin apt versions.)
+
 **Build Steps (for compiled languages):**
 
 After installing dependencies AND after applying bug.patch, you may need to build:
@@ -720,6 +768,7 @@ def run_claude_code_session(
     reference_pr: int | None = None,
     head_sha: str | None = None,
     environment: str = "docker",
+    enforce_offline_tests: bool = True,
 ) -> ClaudeCodeResult:
     """
     Run Claude Code session to complete skeleton and make harbor pass.
@@ -758,6 +807,7 @@ def run_claude_code_session(
             reference_pr=reference_pr,
             head_sha=head_sha,
             environment=environment,
+            enforce_offline_tests=enforce_offline_tests,
         )
     )
 
@@ -776,6 +826,7 @@ async def _run_claude_code_session_async(
     reference_pr: int | None = None,
     head_sha: str | None = None,
     environment: str = "docker",
+    enforce_offline_tests: bool = True,
 ) -> ClaudeCodeResult:
     """Async implementation of Claude Code session."""
     logger = logging.getLogger("swegen")
@@ -831,6 +882,11 @@ async def _run_claude_code_session_async(
             environment=environment,
         )
         logger.info("Using full prompt (generating from skeleton)")
+
+    # Append the offline-tests hard constraint so CC never puts installs/network
+    # in test.sh (task.toml also enforces this at runtime via allow_internet=false).
+    if enforce_offline_tests:
+        prompt_text = prompt_text + "\n" + TEST_OFFLINE_CONSTRAINT
 
     # Create hook for logging Harbor validation attempts
     harbor_runs: list[str] = []

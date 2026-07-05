@@ -5,7 +5,11 @@ import os
 
 from openai import OpenAI
 
-from .utils import CombinedPRTaskEvaluation
+from .utils import CombinedPRTaskEvaluation, _is_relevant_source
+
+# Repository root inside the task container (Dockerfile WORKDIR / clone target).
+# The solver agent runs here, so instruction file paths are made absolute against it.
+CONTAINER_REPO_ROOT = "/app/src"
 
 MAX_LINKED_ISSUES = 5
 MAX_ISSUE_BODY_LENGTH = 2500
@@ -69,7 +73,7 @@ CRITICAL INSTRUCTIONS:
 IMPORTANT - ABOUT TEST FILES:
 You may see test file contents to help you understand what needs to be implemented. However:
 ✗ DO NOT mention the test files themselves (e.g., "from the test sample", "the test fixture", "the provided test")
-✗ DO NOT reference test file names or paths
+✗ DO NOT reference the TEST file names or paths
 ✗ DO NOT say things like "the test shows" or "according to the tests"
 
 Instead, write as if describing the problem from a user/issue perspective:
@@ -78,23 +82,46 @@ Instead, write as if describing the problem from a user/issue perspective:
 ✓ "Expected behavior: ... Actual behavior: ..."
 
 The agent solving this task will NOT see the test files, so any reference to them will be confusing.
+NOTE: This ban is about the TEST files only. Locating the relevant SOURCE/implementation files is
+part of the agent's job, so let it discover them by default; only when it genuinely could not infer
+a location from context do you name a source path (see FILE PATHS below) — those are visible to the
+agent.
 
 WHAT TO INCLUDE:
 ✓ Problem description from issue/PR
 ✓ Expected behavior vs actual behavior
 ✓ Error messages users see
 ✓ Function/method/class names that tests call or issue mentions
+✓ Absolute paths (under /app/src) ONLY for locations the agent could not reasonably infer from
+  context — REQUIRED for net-new files it must create; otherwise let the agent find the files
+  itself (see FILE PATHS)
 ✓ Expected return values or outputs
 ✓ Code examples showing the bug (if in issue/PR)
 ✓ Specific scenarios/cases that should work (derived from tests, but written as requirements)
 
 WHAT TO EXCLUDE:
-✗ File paths or module locations (e.g., "fix in utils/validators.py")
+✗ RELATIVE file paths — every path you mention must be absolute (start with /app/src/)
 ✗ Test file names, paths, or references (e.g., "test_foo.py", "the test fixture")
 ✗ Phrases like "from the test", "the test shows", "according to the tests"
 ✗ Implementation approaches (e.g., "use a try-catch", "add caching")
 ✗ How the PR fixed it (e.g., "I changed X to Y")
 ✗ Internal implementation details not visible in tests/issue
+
+FILE PATHS (IMPORTANT):
+The solver agent runs inside a container where the repository root and working directory is
+/app/src. Finding the existing code to change is PART OF THE TASK — do NOT enumerate the source
+files to modify when the agent can reasonably locate them from the described behavior, the symbols
+involved, or the issue. Only give a path when the agent could not figure it out from context.
+Whenever you DO name a file, use its ABSOLUTE path under /app/src (e.g. /app/src/pkg/module.py) —
+NEVER a relative path like "pkg/module.py".
+- NET-NEW FILES: When the fix needs a NEW file the agent cannot locate on its own — in particular
+  one the tests import by a specific path (the agent never sees the tests) — you MUST state its
+  absolute path and tell the agent to create it (e.g. "create /app/src/pkg/new_module.py"). Omit
+  net-new files whose name/location the agent could reasonably infer or choose itself.
+- ONLY WHEN NEEDED: name an existing file/location just when it is genuinely not inferable from
+  context (e.g. an obscure entry point); otherwise leave discovery to the agent.
+- Do NOT reveal HOW to implement the fix — naming an unavoidable file/location is fine, prescribing
+  the approach (algorithms, regexes, data structures) is not.
 
 FORMAT RULES:
 - Be clear and specific enough that an engineer knows what to implement
@@ -103,13 +130,20 @@ FORMAT RULES:
 - Write naturally, as if explaining to a colleague
 
 EXAMPLE GOOD INSTRUCTION:
-"The email validation is failing for valid email addresses. When calling user.validate_email('test@example.com'), 
-it should return True, but currently returns False for addresses with subdomains. The validation should accept 
+"The email validation is failing for valid email addresses. When calling user.validate_email('test@example.com'),
+it should return True, but currently returns False for addresses with subdomains. The validation should accept
 any email matching the pattern <local>@<domain>.<tld> including subdomains like test@mail.example.com."
 
+EXAMPLE GOOD INSTRUCTION (net-new file):
+"Add rate limiting for the public API. Create a new module at /app/src/api/rate_limit.py exposing a
+RateLimiter class with an `allow(key: str) -> bool` method that permits at most 100 requests per key
+per minute and returns False once the limit is exceeded."
+
 EXAMPLE BAD INSTRUCTION:
-"Fix the email validator in utils/auth.py by changing the regex pattern to support subdomains using a more 
+"Fix the email validator in utils/auth.py by changing the regex pattern to support subdomains using a more
 permissive regex."
+(Bad because: the path is relative — it must be /app/src/utils/auth.py — and it prescribes the
+implementation approach instead of describing the required behavior.)
 
 TAGS:
 Generate exactly 3 tags in this order:
@@ -169,6 +203,7 @@ def _format_user_prompt(
     force_generate_instruction: bool = False,
     test_contents: dict[str, str] | None = None,
     generate_task_name: bool = False,
+    new_source_files: list[str] | None = None,
 ) -> str:
     """Format user prompt for combined evaluation + task generation.
 
@@ -191,7 +226,10 @@ def _format_user_prompt(
             "You should ALWAYS set is_substantial=true and write a comprehensive bug report/task instruction.\n"
             "Even if the PR seems simple, treat it as a valid task and describe the problem that was fixed.\n"
             "Include specific function/method/class names that appear in the tests or issue.\n"
-            "Focus on what needs to be implemented, not where or how to implement it.\n"
+            "Focus on WHAT needs to be implemented (behavior), not HOW to implement it. Let the agent\n"
+            "discover which existing files to change; only name a source file (as an ABSOLUTE path under\n"
+            "/app/src) when it could not infer the location. You MUST give the absolute path of any\n"
+            "net-new file the agent must create.\n"
             "REMEMBER: Do NOT mention test files - the agent won't see them. Write from a user/issue perspective."
         )
     else:
@@ -200,7 +238,10 @@ def _format_user_prompt(
             "Remember: PRs with changes to only 1-2 files are usually too trivial unless they involve major complexity.\n"
             "Look for changes across multiple source files that demonstrate real cross-component coordination.\n"
             "If substantial, write a detailed bug report describing the PROBLEM and what needs to be implemented.\n"
-            "Include specific function/method/class names from tests or issues, but NOT file paths or implementation details.\n"
+            "Include specific function/method/class names from tests or issues. Let the agent discover which\n"
+            "existing files to change; name a source file (as an ABSOLUTE path under /app/src) only when the\n"
+            "location is not inferable, but you MUST give the absolute path of any net-new file the agent must\n"
+            "create. Do NOT reveal implementation details/approach.\n"
             "REMEMBER: Do NOT mention test files - the agent won't see them. Write from a user/issue perspective.\n"
             "If not substantial, explain why briefly and set instruction to null."
         )
@@ -240,6 +281,22 @@ def _format_user_prompt(
             total_length += len(content)
         
         test_section = "\n".join(test_lines) + "\n\n"
+
+    # Net-new files the agent must create. These are REQUIRED in the instruction as absolute
+    # paths (the agent can't guess where to place files that the tests import by module path).
+    new_files_section = ""
+    if new_source_files:
+        new_files_lines = [
+            "Net-new files introduced by this fix (they do NOT exist in the buggy starting state, so "
+            "the agent would have to create them). Using the test files above, decide which of these "
+            "the agent genuinely needs told: if a test imports/references one by a specific path, or "
+            "its location otherwise cannot be inferred, state its ABSOLUTE path and tell the agent to "
+            "create it; omit any the agent could reasonably infer or place itself. Candidates:"
+        ]
+        for rel in new_source_files:
+            abs_path = f"{CONTAINER_REPO_ROOT}/{rel.lstrip('/')}"
+            new_files_lines.append(f"  - {abs_path}")
+        new_files_section = "\n".join(new_files_lines) + "\n\n"
 
     # MODE 1: Linked issues exist - use issue + PR body + tests
     if linked_issues and len(linked_issues) > 0:
@@ -284,6 +341,7 @@ def _format_user_prompt(
             + pr_body_section
             + task_name_section
             + test_section
+            + new_files_section
             + f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n"
             + ending_instruction
         )
@@ -299,6 +357,7 @@ def _format_user_prompt(
         + (f"PR Description:\n{pr_body_truncated}\n\n" if pr_body_truncated else "")
         + task_name_section
         + test_section
+        + new_files_section
         + f"Scope (for evaluation only): {source_files} source files, {tests} test files changed\n\n"
         + ending_instruction
     )
@@ -348,6 +407,18 @@ def evaluate_and_generate_task(
     pr_title = _sanitize_for_openai(metadata.get("title", ""))
     pr_body = _sanitize_for_openai(metadata.get("body", ""))
     changed_files = [f.get("filename", "") for f in files]
+
+    # Net-new source files introduced by this PR: newly-created paths (added or copied) that are
+    # part of the fix. Use _is_relevant_source so this matches what fix.patch actually contains —
+    # it excludes tests, CI/meta (.github, .gitlab, .circleci), and build artifacts, which are not
+    # things the agent must create and are not test import paths.
+    new_source_files = [
+        _sanitize_for_openai(f.get("filename", ""))
+        for f in files
+        if f.get("status") in ("added", "copied")
+        and f.get("filename")
+        and _is_relevant_source(f.get("filename", ""))
+    ]
     
     # Sanitize linked issues if present
     sanitized_linked_issues = None
@@ -376,6 +447,7 @@ def evaluate_and_generate_task(
         force_generate_instruction=force_generate_instruction,
         test_contents=sanitized_test_contents,
         generate_task_name=generate_task_name,
+        new_source_files=new_source_files,
     )
 
     client = OpenAI(

@@ -92,6 +92,13 @@ def create_cmd(
         False,
         help="Allow processing unmerged PRs (for testing/preview); --allow-unmerged to enable",
     ),
+    enforce_offline_tests: bool = typer.Option(
+        True,
+        "--offline-tests/--allow-test-network",
+        help="Forbid dependency installs / network access in tests/test.sh and set "
+        "[environment].allow_internet=false in task.toml (internet only during Docker build); "
+        "--allow-test-network to disable",
+    ),
     environment: str = typer.Option(
         "docker",
         "-e",
@@ -118,6 +125,7 @@ def create_cmd(
         allow_unmerged=allow_unmerged,
         environment=EnvironmentType(environment),
         generate_name=generate_name,
+        enforce_offline_tests=enforce_offline_tests,
         verbose=verbose,
         quiet=quiet,
     )
@@ -174,6 +182,12 @@ def validate(
         help="Run docker cleanup after every N tasks (0 to disable, local docker only)",
         show_default=True,
     ),
+    enforce_offline_tests: bool = typer.Option(
+        True,
+        "--offline-tests/--allow-test-network",
+        help="Fail tasks whose tests/test.sh installs deps or accesses the network at "
+        "test time (offline-tests policy); --allow-test-network to disable",
+    ),
 ) -> None:
     if agent not in ("both", "nop", "oracle"):
         raise typer.BadParameter("agent must be one of: both, nop, oracle")
@@ -191,6 +205,7 @@ def validate(
             show_passed=show_passed,
             output_file=output,
             docker_prune_batch=docker_prune_batch,
+            enforce_offline_tests=enforce_offline_tests,
         )
     )
 
@@ -264,6 +279,12 @@ def analyze(
         help="OpenAI model for verdict synthesis",
         show_default=True,
     ),
+    enforce_offline_tests: bool = typer.Option(
+        True,
+        "--offline-tests/--allow-test-network",
+        help="Flag tests/test.sh installs or network access in the quality check; "
+        "--allow-test-network to disable",
+    ),
 ) -> None:
     """
     Analyze a Harbor task to determine if it's well-specified.
@@ -312,6 +333,7 @@ def analyze(
             verbose=verbose,
             classification_timeout=classification_timeout,
             verdict_timeout=verdict_timeout,
+            enforce_offline_tests=enforce_offline_tests,
         )
     )
 
@@ -381,6 +403,13 @@ def farm(
     validate: bool = typer.Option(
         True, help="Run Harbor validation after CC; --no-validate to skip"
     ),
+    enforce_offline_tests: bool = typer.Option(
+        True,
+        "--offline-tests/--allow-test-network",
+        help="Forbid dependency installs / network access in tests/test.sh and set "
+        "[environment].allow_internet=false in task.toml (internet only during Docker build); "
+        "--allow-test-network to disable",
+    ),
 ) -> None:
     """
     Continuously process merged GitHub PRs and convert them to Harbor tasks.
@@ -409,6 +438,7 @@ def farm(
         verbose=verbose,
         require_issue=require_issue,
         validate=validate,
+        enforce_offline_tests=enforce_offline_tests,
     )
 
     console = Console()
