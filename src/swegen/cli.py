@@ -217,7 +217,7 @@ def analyze(
         "claude-code", "-a", "--agent", help="Agent to run trials with", show_default=True
     ),
     model: str = typer.Option(
-        "anthropic/claude-sonnet-5",
+        "anthropic/claude-opus-4-8",
         "-m",
         "--model",
         help="Model to use for agent trials",

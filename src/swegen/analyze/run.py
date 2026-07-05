@@ -116,7 +116,7 @@ class AnalyzeArgs:
 
     task_path: Path
     agent: str = "claude-code"
-    model: str = "anthropic/claude-sonnet-5"
+    model: str = "anthropic/claude-opus-4-8"
     n_trials: int = 3
     n_concurrent: int = 1  # Number of concurrent trials (matches Harbor's -n flag)
     jobs_dir: Path = Path(".swegen/analyze-jobs")
