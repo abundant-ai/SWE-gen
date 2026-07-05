@@ -5,7 +5,7 @@ Currently enforces the *offline tests* policy:
     tests/test.sh must NOT install dependencies or access the network.
     All dependencies, tools, and builds belong in the Dockerfile, where the
     internet is available at build time. The verifier/test container runs with
-    no network (task.toml sets [environment].allow_internet = false), so any
+    no network (task.toml sets [environment].network_mode = "no-network"), so any
     live install in test.sh would fail at runtime anyway. This check catches it
     statically at generation/validation time with a clear message.
 
@@ -131,7 +131,7 @@ def format_violations(task_dir: Path, violations: list[TestNetworkViolation]) ->
         f"tests/test.sh in '{Path(task_dir).name}' installs dependencies or accesses "
         "the network at test time. This is forbidden by the offline-tests policy: "
         "all dependencies/tools/builds must be in the Dockerfile (build time), and the "
-        "verifier runs with no network (allow_internet=false)."
+        "verifier runs with no network (network_mode=no-network)."
     )
     body = "\n".join(str(v) for v in violations)
     return f"{header}\n{body}"

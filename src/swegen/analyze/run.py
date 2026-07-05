@@ -282,8 +282,9 @@ def _run_quality_check(
     enforce_offline_tests: bool = True,
 ) -> QualityCheckResult:
     """Run Harbor's static quality check on the task."""
+    # Harbor >=0.13 moved quality checking from `harbor tasks check` to the top-level
+    # `harbor check <task-dir>` command (same -m/--model flag).
     cmd = harbor_cmd_base() + [
-        "tasks",
         "check",
         str(task_path),
         "-m",

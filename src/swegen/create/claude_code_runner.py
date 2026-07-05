@@ -30,12 +30,12 @@ class ClaudeCodeResult:
 
 
 # Appended to the CC prompt when offline-tests enforcement is on. The generated
-# task.toml sets allow_internet=false, so the verifier container has no network;
+# task.toml sets network_mode=no-network, so the verifier container has no network;
 # a static gate also hard-fails any test.sh that installs/fetches at test time.
 TEST_OFFLINE_CONSTRAINT = """
 ## HARD CONSTRAINT: tests/test.sh must be fully offline
 
-The verifier runs with **no network access** (task.toml sets `allow_internet = false`).
+The verifier runs with **no network access** (task.toml sets `network_mode = "no-network"`).
 Internet is available **only during the Docker image build** (the Dockerfile).
 
 Therefore:
@@ -884,7 +884,7 @@ async def _run_claude_code_session_async(
         logger.info("Using full prompt (generating from skeleton)")
 
     # Append the offline-tests hard constraint so CC never puts installs/network
-    # in test.sh (task.toml also enforces this at runtime via allow_internet=false).
+    # in test.sh (task.toml also enforces this at runtime via network_mode=no-network).
     if enforce_offline_tests:
         prompt_text = prompt_text + "\n" + TEST_OFFLINE_CONSTRAINT
 

@@ -31,7 +31,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
     "claude-agent-sdk>=0.1.20",
-    "harbor>=0.1.41",
+    "harbor>=0.17.1",
 ]
 
 [project.urls]

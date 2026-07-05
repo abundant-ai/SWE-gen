@@ -96,7 +96,7 @@ def create_cmd(
         True,
         "--offline-tests/--allow-test-network",
         help="Forbid dependency installs / network access in tests/test.sh and set "
-        "[environment].allow_internet=false in task.toml (internet only during Docker build); "
+        "[environment].network_mode=no-network in task.toml (internet only during Docker build); "
         "--allow-test-network to disable",
     ),
     environment: str = typer.Option(
@@ -407,7 +407,7 @@ def farm(
         True,
         "--offline-tests/--allow-test-network",
         help="Forbid dependency installs / network access in tests/test.sh and set "
-        "[environment].allow_internet=false in task.toml (internet only during Docker build); "
+        "[environment].network_mode=no-network in task.toml (internet only during Docker build); "
         "--allow-test-network to disable",
     ),
 ) -> None:
