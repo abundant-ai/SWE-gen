@@ -28,7 +28,7 @@ from .models import (
 
 
 # OpenAI verdict synthesis constants
-VERDICT_MODEL = "gpt-5.2"
+VERDICT_MODEL = "gpt-5.5"
 VERDICT_TIMEOUT = 120.0
 VERDICT_MAX_TOKENS = 4096
 
@@ -45,7 +45,7 @@ def classify_trial(
     trial_dir: str | Path,
     task_dir: str | Path,
     *,
-    model: str = "claude-sonnet-4-5",
+    model: str = "claude-opus-4-8",
     verbose: bool = False,
     timeout: int = 300,
 ) -> TrialClassification:
@@ -67,7 +67,7 @@ def classify_trial(
     Args:
         trial_dir: Path to trial directory (contains result.json, agent/, verifier/)
         task_dir: Path to task directory (contains instruction.md, solution/, tests/)
-        model: Model name for Claude Code (default: claude-sonnet-4-5)
+        model: Model name for Claude Code (default: claude-opus-4-8)
         verbose: If True, stream Claude Code output to console
         timeout: Maximum time for classification in seconds (default: 300 = 5 min)
         
@@ -92,14 +92,14 @@ class TrialClassifier:
     
     def __init__(
         self,
-        model: str = "claude-sonnet-4-5",
+        model: str = "claude-opus-4-8",
         verbose: bool = False,
         timeout: int = 300,  # 5 minutes per classification
     ):
         """Initialize the classifier.
         
         Args:
-            model: Model name for Claude Code (default: claude-sonnet-4-5)
+            model: Model name for Claude Code (default: claude-opus-4-8)
             verbose: If True, stream Claude Code output to console
             timeout: Maximum time per classification in seconds (default: 300 = 5 min)
         """
@@ -436,7 +436,7 @@ def _compute_task_verdict_openai(
         classifications: List of individual trial classifications
         baseline: Optional baseline validation results
         quality_check_passed: Whether static quality check passed
-        model: OpenAI model to use (default: gpt-5.2)
+        model: OpenAI model to use (default: gpt-5.5)
         console: Optional console for progress output
         verbose: If True, print progress messages
         api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)
@@ -567,7 +567,7 @@ def compute_task_verdict(
         classifications: List of trial classifications
         baseline: Optional baseline validation results
         quality_check_passed: Whether static quality check passed
-        model: OpenAI model name (default: gpt-5.2)
+        model: OpenAI model name (default: gpt-5.5)
         console: Optional console for progress output
         verbose: If True, print progress messages
         api_key: Optional OpenAI API key (defaults to OPENAI_API_KEY env var)

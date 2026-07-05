@@ -916,7 +916,7 @@ async def _run_claude_code_session_async(
             allowed_tools=["Read", "Write", "Edit", "Glob", "Grep", "LS", "Bash"],
             permission_mode="bypassPermissions",  # Auto-approve actions
             cwd=os.getcwd(),  # Run from project root
-            model="sonnet",  # Use Sonnet model
+            model="claude-opus-4-8",  # Use Opus 4.8
             hooks={
                 "PreToolUse": [HookMatcher(matcher="Bash", hooks=[log_harbor_runs])]
             } if verbose else {},
