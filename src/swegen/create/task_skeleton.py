@@ -6,6 +6,7 @@ from pathlib import Path
 from harbor.models.task.config import (
     AgentConfig,
     EnvironmentConfig,
+    NetworkMode,
     TaskConfig,
     VerifierConfig,
 )
@@ -253,9 +254,9 @@ def generate_task_toml(instruction_data: dict, enforce_offline_tests: bool = Tru
     Uses Harbor's TaskConfig for proper serialization and validation.
 
     When ``enforce_offline_tests`` is True, the environment is configured with
-    ``allow_internet=false`` so the agent/verifier container runs with no network.
-    Internet remains available during the Docker image build (build is not gated
-    by this flag), matching the "internet only during environment setup" policy.
+    ``network_mode="no-network"`` so the agent/verifier container runs with no
+    network. Internet remains available during the Docker image build (build is
+    not gated by this), matching the "internet only during environment setup" policy.
     """
     env_kwargs: dict = {
         "build_timeout_sec": 600.0,
@@ -264,7 +265,7 @@ def generate_task_toml(instruction_data: dict, enforce_offline_tests: bool = Tru
         "storage_mb": 10240,
     }
     if enforce_offline_tests:
-        env_kwargs["allow_internet"] = False
+        env_kwargs["network_mode"] = NetworkMode.NO_NETWORK
 
     config = TaskConfig(
         metadata={

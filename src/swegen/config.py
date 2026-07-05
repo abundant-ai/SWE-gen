@@ -33,7 +33,7 @@ class CreateConfig:
         generate_name: Generate semantic task name instead of PR number
         enforce_offline_tests: Forbid runtime dependency installs / network access in tests/test.sh.
             When True (default): CC is told not to install/network in test.sh, a static gate hard-fails
-            any test.sh that does, and the generated task.toml sets [environment].allow_internet=false
+            any test.sh that does, and the generated task.toml sets [environment].network_mode=no-network
             (internet is available only during the Docker build). Disable with --allow-test-network.
         verbose: Increase output verbosity
         quiet: Reduce output verbosity
