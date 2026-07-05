@@ -162,6 +162,11 @@ def generate_test_sh(
 
 cd /app/src
 
+# OFFLINE TESTS POLICY: do NOT install dependencies or access the network here.
+# All runtime deps, tools, and build steps must be installed in the Dockerfile
+# (build time, where the internet is available). This container runs the tests
+# with no network access, so any live install here will fail.
+
 # TODO: Set environment variables if needed for tests
 # Examples: CI=true, NODE_ENV=test, RUST_BACKTRACE=1
 
@@ -178,9 +183,8 @@ cd /app/src
 # Examples for different languages/frameworks:
 #
 # Python (pytest with uv):
-#   # If using uv venv at /opt/venv:
+#   # If using uv venv at /opt/venv (deps already installed at build time):
 #   source /opt/venv/bin/activate
-#   uv pip install -e . --no-deps 2>/dev/null || true  # Reinstall to pick up changes
 #   pytest -xvs path/to/test_file.py
 #   # Or without venv activation:
 #   /opt/venv/bin/pytest -xvs path/to/test_file.py
@@ -243,11 +247,25 @@ def generate_instruction_md(instruction_data: dict) -> str:
     return instruction_data["instruction"]
 
 
-def generate_task_toml(instruction_data: dict) -> str:
+def generate_task_toml(instruction_data: dict, enforce_offline_tests: bool = True) -> str:
     """Generate task.toml config file for Harbor format.
 
     Uses Harbor's TaskConfig for proper serialization and validation.
+
+    When ``enforce_offline_tests`` is True, the environment is configured with
+    ``allow_internet=false`` so the agent/verifier container runs with no network.
+    Internet remains available during the Docker image build (build is not gated
+    by this flag), matching the "internet only during environment setup" policy.
     """
+    env_kwargs: dict = {
+        "build_timeout_sec": 600.0,
+        "cpus": 1,
+        "memory_mb": 2048,
+        "storage_mb": 10240,
+    }
+    if enforce_offline_tests:
+        env_kwargs["allow_internet"] = False
+
     config = TaskConfig(
         metadata={
             "difficulty": instruction_data.get("difficulty", "medium"),
@@ -256,11 +274,6 @@ def generate_task_toml(instruction_data: dict) -> str:
         },
         verifier=VerifierConfig(timeout_sec=600.0),
         agent=AgentConfig(timeout_sec=600.0),
-        environment=EnvironmentConfig(
-            build_timeout_sec=600.0,
-            cpus=1,
-            memory_mb=2048,
-            storage_mb=10240,
-        ),
+        environment=EnvironmentConfig(**env_kwargs),
     )
     return config.model_dump_toml()
