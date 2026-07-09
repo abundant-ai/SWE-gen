@@ -17,6 +17,7 @@ from rich.text import Text
 from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
+from swegen.publish import PublishContext, PublishError, build_task_sink
 from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
 from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
@@ -281,6 +282,45 @@ def _save_state_record(
         logger.warning(f"Unexpected error saving state record for {repo_key}: {e}", exc_info=True)
 
 
+def _publish_task(
+    console: Console,
+    config: CreateConfig,
+    repo: str,
+    pr: int,
+    task_id: str,
+    task_dir: Path,
+    metadata: dict,
+) -> str | None:
+    """Publish the validated task as a PR on the dataset repo.
+
+    Runs only after every gate has passed, so the dataset repo never receives a task
+    that failed validation. Raises PublishError on failure - an unpublished task is
+    lost when an ephemeral sandbox dies, so it is not a success.
+
+    Returns the PR URL, or None when publishing is disabled or dry-run.
+    """
+    sink = build_task_sink(config.publish, repo, state_dir=config.state_dir)
+    ctx = PublishContext(
+        task_id=task_id,
+        task_dir=task_dir,
+        source_repo=repo,
+        source_pr=pr,
+        source_pr_url=metadata.get("html_url", f"https://github.com/{repo}/pull/{pr}"),
+        metadata=metadata,
+    )
+
+    if config.publish is None:
+        return None
+
+    console.print(Rule(Text("Publish", style="bold blue")))
+    result = sink.publish(ctx)
+    if result.pr_url:
+        console.print(f"[green]✓ Published {task_id} → {result.pr_url}[/green]")
+    elif config.publish.dry_run:
+        console.print(f"[cyan]DRY RUN: would publish {task_id} on branch {result.branch}[/cyan]")
+    return result.pr_url
+
+
 def _display_summary_panel(
     console: Console,
     repo: str,
@@ -410,11 +450,15 @@ def _run_harbor_validations(
     return results_rows, job_dirs
 
 
-def run_reversal(config: CreateConfig) -> None:
+def run_reversal(config: CreateConfig) -> str | None:
     """Convert a merged PR into a Harbor task.
 
     Args:
         config: Typed configuration with repo, PR number, and options.
+
+    Returns:
+        URL of the pull request the task was published to, or None if publishing is
+        disabled (no config.publish), running dry, or the task was skipped by dedupe.
     """
     rich_traceback_install(show_locals=False)
     console = Console()
@@ -669,6 +713,12 @@ def run_reversal(config: CreateConfig) -> None:
             state_dir, state_file, repo_key, pipeline.repo, config.pr, task_id, task_dir
         )
 
+        # Publish the task before anything else can go wrong. On ephemeral sandboxes
+        # this is the only durable copy of the task.
+        pr_url = _publish_task(
+            console, config, pipeline.repo, config.pr, task_id, task_dir, metadata
+        )
+
         # Display final panels
         _display_summary_panel(
             console, pipeline.repo, config.pr, task_id, task_dir, gen_log_path, validation_table,
@@ -681,6 +731,13 @@ def run_reversal(config: CreateConfig) -> None:
             harbor_oracle_job_dir,
         )
         _display_next_steps_panel(console, harbor_root, task_id)
+        return pr_url
+    except PublishError as e:
+        # Already-diagnosed publish failure: show the reason, skip the traceback.
+        console.print(
+            Panel(Text(str(e), style="red"), title="[red]Publish Failed[/red]", border_style="red")
+        )
+        raise
     except (TrivialPRError, MissingIssueError, ValidationError, FileExistsError):
         # Re-raise these exceptions so caller can handle them
         raise

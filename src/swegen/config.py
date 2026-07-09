@@ -8,6 +8,46 @@ from harbor.models.environment_type import EnvironmentType
 
 
 @dataclass(frozen=True)
+class PublishConfig:
+    """Configuration for publishing generated tasks to a dataset repository.
+
+    When present on a CreateConfig/FarmConfig, every validated task is copied into
+    a clone of ``repo``, committed on its own branch cut fresh from ``base_branch``,
+    pushed, and opened as a pull request. Farm state is committed to a separate,
+    per-source-repo branch so an ephemeral sandbox can resume where it left off.
+
+    Attributes:
+        repo: Dataset repository in "owner/repo" format (receives the task PRs)
+        token: Token with contents:write + pull_requests:write on ``repo``
+        tasks_path: Directory within ``repo`` that tasks are written to
+        base_branch: Branch every task branch is cut from, and that PRs target
+        branch_prefix: Prefix for per-task branches ("task/" -> "task/<task_id>")
+        state_branch_prefix: Prefix for the per-source-repo state branch. Git refs are a
+            directory namespace, so a bare "farm-state" branch cannot coexist with
+            "farm-state/<slug>" - only the prefixed form is ever created.
+        state_path: Directory within the state branch holding state JSON
+        clone_dir: Where to clone the dataset repo. Defaults to
+            .swegen/publish/<dataset_slug>/<source_slug>, keyed by source repo so two
+            farms sharing a host never fight over one working tree.
+        dry_run: Perform local clone/branch/commit but skip pushes and PR creation
+        author_name: git author/committer name for task and state commits
+        author_email: git author/committer email for task and state commits
+    """
+
+    repo: str
+    token: str
+    tasks_path: str = "tasks"
+    base_branch: str = "main"
+    branch_prefix: str = "task/"
+    state_branch_prefix: str = "farm-state/"
+    state_path: str = "state"
+    clone_dir: Path | None = None
+    dry_run: bool = False
+    author_name: str = "aman-abundant"
+    author_email: str = "aman@abundant.systems"
+
+
+@dataclass(frozen=True)
 class CreateConfig:
     """Configuration for the create command (PR → Harbor task).
 
@@ -35,6 +75,7 @@ class CreateConfig:
             When True (default): CC is told not to install/network in test.sh, a static gate hard-fails
             any test.sh that does, and the generated task.toml sets [environment].network_mode=no-network
             (internet is available only during the Docker build). Disable with --allow-test-network.
+        publish: When set, publish the validated task as a PR on a dataset repo
         verbose: Increase output verbosity
         quiet: Reduce output verbosity
     """
@@ -55,6 +96,7 @@ class CreateConfig:
     environment: EnvironmentType = EnvironmentType.DOCKER
     generate_name: bool = False
     enforce_offline_tests: bool = True
+    publish: PublishConfig | None = None
     verbose: bool = False
     quiet: bool = False
 
@@ -97,6 +139,8 @@ class FarmConfig:
         validate: Run Harbor validation after CC (useful when CC times out but task may be valid)
         enforce_offline_tests: Forbid runtime dependency installs / network access in tests/test.sh
             (see CreateConfig). Disable with --allow-test-network.
+        publish: When set, publish each validated task as a PR on a dataset repo and
+            persist farm state to a branch on that repo (survives ephemeral sandboxes).
     """
 
     repo: str
@@ -121,6 +165,7 @@ class FarmConfig:
     require_issue: bool = True
     validate: bool = True
     enforce_offline_tests: bool = True
+    publish: PublishConfig | None = None
 
 
 @dataclass(frozen=True)

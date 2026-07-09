@@ -75,6 +75,61 @@ Key options:
 - `--no-validate`: Skip Harbor validation
 - `--skip-list PATH`: Path to file with task IDs to skip (one per line)
 
+### Publishing tasks (ephemeral sandboxes)
+
+Both `create` and `farm` can publish each validated task to a **dataset repo** as its own
+branch + PR, immediately. This is what makes farming safe on ephemeral sandboxes like
+Daytona: nothing of value lives only on local disk.
+
+```bash
+export GIT_TOKEN=<token>   # contents:write + pull_requests:write on the dataset repo
+swegen farm fastapi/fastapi --publish-repo abundant-ai/ots-tasks
+```
+
+Per validated task: a branch `task/<task_id>` is cut fresh from `main`, the task directory
+is copied to `tasks/<task_id>`, committed as `Add task: <task_id>`, pushed, and opened as a
+PR whose body links back to the source PR.
+
+Farm state is committed to a **per-source-repo branch** `farm-state/<owner>__<repo>` on the
+same dataset repo after every PR, so a fresh sandbox resumes exactly where the dead one
+stopped rather than re-burning Claude Code and OpenAI calls on PRs it already rejected.
+Per-repo branch names mean N containers farming N repos never contend.
+
+Key options:
+- `--publish-repo`: Dataset repo (`owner/repo`). Its presence enables publishing.
+- `--publish-path`: Directory within the dataset repo (default: `tasks`)
+- `--publish-base`: Branch task branches are cut from and PRs target (default: `main`)
+- `--publish-branch-prefix`: Default `task/`
+- `--publish-state-branch-prefix`: Default `farm-state/`
+- `--publish-state-path`: Default `state`
+- `--publish-clone-dir`: Default `<state-dir>/publish/<dataset_slug>/<source_slug>`
+- `--publish-dry-run`: Clone, branch and commit locally; never push or open a PR
+
+**Contract with the dataset repo:** task PRs touch only `tasks/<task_id>/`, so PRs from
+different source repos merge into `main` without conflict. Do **not** add a top-level
+manifest or a README table of tasks — it would textually conflict on every merge. Generate
+any such index in CI from the directory listing instead.
+
+Tasks are staged with `git add --force`. SWE-gen's own `.gitignore` excludes `tasks/`
+(it is the local output directory), and a dataset repo created from this template inherits
+that rule — without `--force` the publish would fail on `git add` with "paths are ignored".
+Only the one `tasks/<task_id>/` pathspec is ever staged.
+
+**Publish failures stop the run.** A bad token fails at preflight, before any PR is
+processed. Once farming is underway, a fatal failure (token rejected, GitHub down, retries
+exhausted against a 5xx or rate limit) aborts immediately — the next PR would spend a full
+Claude Code session only to hit the same wall. An ambiguous failure (a rejected `git push`
+looks identical whether the remote is broken or the task is) is tolerated once and aborts on
+the second in a row. Non-publish failures never abort.
+
+Tasks that fail to publish are **kept on disk** (unlike other failures, which are cleaned
+up): they passed every validation gate, so they are valid work that can be pushed by hand or
+by a re-run. Farm state is preserved, so a re-run does not regenerate already-processed PRs.
+
+`GIT_TOKEN` is separate from `GITHUB_TOKEN` (read-only, used to fetch source PRs) so a farm
+run can read from anywhere while only ever writing to one repo. It falls back to
+`GITHUB_TOKEN` if unset.
+
 ### `swegen validate`
 Validate existing Harbor tasks.
 
@@ -143,6 +198,15 @@ src/swegen/
 │   ├── farm_hand.py        # Per-PR processing logic
 │   ├── fetcher.py          # StreamingPRFetcher - GitHub PR streaming
 │   └── state.py            # StreamState - persistence for resumability
+├── publish/                # Publish tasks + farm state to a dataset repo
+│   ├── base.py             # TaskSink / StateStore protocols, PublishContext/Result
+│   ├── git_ops.py          # GitRepo - subprocess git wrapper (clone, branch, worktree)
+│   ├── gh_api.py           # GitHubAPI - REST client with bounded retries
+│   ├── github_pr.py        # GitHubPRSink - branch + PR per task
+│   ├── git_state.py        # GitStateStore - state on farm-state/<slug> branch
+│   ├── local_state.py      # LocalStateStore - state on local disk (default)
+│   ├── null.py             # NullSink - no publishing (default)
+│   └── body.py             # PR title/body/commit message templates
 └── tools/                  # Utility tools
     ├── validate.py         # Harbor NOP/Oracle validation
     ├── harbor_runner.py    # Harbor CLI wrapper
@@ -316,6 +380,7 @@ All configuration is done via dataclasses in `config.py`:
 - **CreateConfig** - Single PR → task conversion
 - **FarmConfig** - Continuous PR farming
 - **ValidateConfig** - Task validation
+- **PublishConfig** - Dataset repo, token, branch/path naming (None disables publishing)
 
 Key defaults:
 - Claude Code always used for task completion
@@ -341,8 +406,22 @@ State is persisted in `.swegen/`:
 ├── repos/              # Cached git repos
 ├── harbor-jobs/        # Harbor job artifacts
 ├── logs/               # Generation logs
+├── publish/            # Clone of the dataset repo (when --publish-repo is set)
+│   └── <dataset_slug>/<source_slug>/       # main tree: task branches
+│   └── <dataset_slug>/<source_slug>-state/ # linked worktree: state branch
 └── task_references.json    # Successful task references
 ```
+
+All of `.swegen/` is lost when an ephemeral sandbox dies. With `--publish-repo`, tasks and
+`StreamState` are mirrored to the dataset repo, which is the durable copy.
+
+The task branch and the state branch share one clone but live in **separate working trees**
+(`git worktree`), so the state push that follows every PR never disturbs the task branch
+being built in the main tree.
+
+Task publishing is serial-only: `StreamFarmer` processes one PR at a time, so a single
+working tree with `checkout -B` per task is safe. Concurrent generation within one process
+would need a worktree per task.
 
 ---
 
@@ -375,12 +454,17 @@ Common error types:
 - **ValidationError** - Harbor NOP/Oracle validation failed
 - **FileExistsError** - Task already exists (use `--force`)
 
+- **PublishError** - Task-specific publish rejection; farming continues
+- **PublishFatalError** - Publishing is broken for every task (GitHub down, retries exhausted); farming stops
+- **PublishAuthError** - Publish token missing, invalid, or lacking write access (subclass of PublishFatalError)
+
 Farm mode classifies failures for reporting:
 - Trivial PR (skipped)
 - No linked issue (skipped)
 - Validation failed
 - API rate limit exceeded
 - Git checkout failed
+- Publish failed
 
 ---
 

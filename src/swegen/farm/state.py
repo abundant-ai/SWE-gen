@@ -27,6 +27,8 @@ class StreamState:
         
         # Detailed categorization
         successful_prs: dict[int, str] = None  # PR# -> task_id
+        task_pr_urls: dict[int, str] = None  # PR# -> URL of the published task PR
+        publish_failed_prs: set[int] = None  # Task built but could not be published
         trivial_prs: set[int] = None  # Trivial PRs (too small/simple)
         no_issue_prs: set[int] = None  # PRs without linked issues
         no_tests_prs: set[int] = None  # PRs that don't modify tests
@@ -52,6 +54,8 @@ class StreamState:
     
     # Detailed categorization
     successful_prs: dict[int, str] = None  # PR# -> task_id
+    task_pr_urls: dict[int, str] = None  # PR# -> URL of the published task PR
+    publish_failed_prs: set[int] = None
     trivial_prs: set[int] = None
     no_issue_prs: set[int] = None
     no_tests_prs: set[int] = None
@@ -70,6 +74,10 @@ class StreamState:
             self.skip_list_prs = set()
         if self.successful_prs is None:
             self.successful_prs = {}
+        if self.task_pr_urls is None:
+            self.task_pr_urls = {}
+        if self.publish_failed_prs is None:
+            self.publish_failed_prs = set()
         if self.trivial_prs is None:
             self.trivial_prs = set()
         if self.no_issue_prs is None:
@@ -92,8 +100,8 @@ class StreamState:
             self.other_failed_prs = {}
 
     def mark_processed(
-        self, pr_number: int, created_at: str, success: bool, task_id: str = None, 
-        category: str = None, message: str = None
+        self, pr_number: int, created_at: str, success: bool, task_id: str = None,
+        category: str = None, message: str = None, pr_url: str = None
     ) -> None:
         """Mark a PR as processed and update counters.
 
@@ -104,14 +112,17 @@ class StreamState:
             task_id: Task ID if successful (for tracking)
             category: Category of result (for detailed stats)
             message: Error/skip message (for other_failed category)
+            pr_url: URL of the published task PR, if the task was published
         """
         self.processed_prs.add(pr_number)
         self.total_processed += 1
-        
+
         if success:
             self.successful += 1
             if task_id:
                 self.successful_prs[pr_number] = task_id
+            if pr_url:
+                self.task_pr_urls[pr_number] = pr_url
         else:
             self.failed += 1
             # Categorize the failure/skip
@@ -133,6 +144,8 @@ class StreamState:
                 self.timeout_prs.add(pr_number)
             elif category == "git_error":
                 self.git_error_prs.add(pr_number)
+            elif category == "publish_failed":
+                self.publish_failed_prs.add(pr_number)
             else:
                 # Other/unknown error
                 self.other_failed_prs[pr_number] = message or "Unknown error"
@@ -155,6 +168,8 @@ class StreamState:
             "last_updated": self.last_updated,
             # Detailed breakdown
             "successful_prs": {str(k): v for k, v in self.successful_prs.items()},
+            "task_pr_urls": {str(k): v for k, v in self.task_pr_urls.items()},
+            "publish_failed_prs": list(self.publish_failed_prs),
             "trivial_prs": list(self.trivial_prs),
             "no_issue_prs": list(self.no_issue_prs),
             "no_tests_prs": list(self.no_tests_prs),
@@ -189,6 +204,8 @@ class StreamState:
             last_updated=data.get("last_updated"),
             # Detailed breakdown
             successful_prs={int(k): v for k, v in data.get("successful_prs", {}).items()},
+            task_pr_urls={int(k): v for k, v in data.get("task_pr_urls", {}).items()},
+            publish_failed_prs=set(data.get("publish_failed_prs", [])),
             trivial_prs=set(data.get("trivial_prs", [])),
             no_issue_prs=set(data.get("no_issue_prs", [])),
             no_tests_prs=set(data.get("no_tests_prs", [])),

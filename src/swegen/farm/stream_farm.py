@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from swegen.config import FarmConfig
+from swegen.publish import build_state_store, build_task_sink
 
 from .farm_hand import (
     PRCandidate,
@@ -62,17 +63,31 @@ class StreamFarmer:
         self.config = config
         self.console = console
         self.tasks_root = config.output
-        self.tasks_root.mkdir(exist_ok=True)
+        self.tasks_root.mkdir(parents=True, exist_ok=True)
 
-        # State file path
+        # State file path (also the local mirror when publishing)
         self.state_file = config.state_dir / "stream_farm" / f"{_slug(repo)}.json"
+
+        # Preflight the sink before any PR is processed: a bad token must fail in
+        # seconds, not after the first hour-long Claude Code session.
+        self.sink = build_task_sink(config.publish, repo, state_dir=config.state_dir)
+        if config.publish is not None:
+            self.console.print(
+                f"[cyan]Publishing tasks to {config.publish.repo} "
+                f"(base: {config.publish.base_branch})[/cyan]"
+            )
+            self.sink.preflight()
+
+        self.state_store = build_state_store(
+            config.publish, repo, self.state_file, state_dir=config.state_dir
+        )
 
         # Load or create state
         if config.reset:
             self.state = StreamState(repo=repo)
             self.console.print("[yellow]State reset - starting fresh[/yellow]")
         else:
-            self.state = StreamState.load(self.state_file, repo)
+            self.state = self.state_store.load(repo)
 
         # Load skip list if provided
         if config.skip_list:
@@ -102,6 +117,7 @@ class StreamFarmer:
 
         # Graceful shutdown handling
         self.shutdown_requested = False
+        self.aborted = False
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
@@ -157,7 +173,8 @@ class StreamFarmer:
         """Run the continuous farming process.
 
         Returns:
-            Exit code: 0 if any tasks succeeded, 1 otherwise
+            Exit code: 0 if any tasks succeeded, 1 otherwise. Aborting because publishing
+            broke is always a failure, even if earlier tasks published fine.
         """
         self._print_header()
 
@@ -169,6 +186,8 @@ class StreamFarmer:
         finally:
             self._finalize()
 
+        if self.aborted:
+            return 1
         return 0 if self.state.successful > 0 else 1
 
     def _print_header(self) -> None:
@@ -225,17 +244,23 @@ class StreamFarmer:
 
         # Mark as processed with detailed tracking
         self.state.mark_processed(
-            pr.number, 
-            pr.created_at, 
+            pr.number,
+            pr.created_at,
             result.status == "success",
             task_id=result.task_id if result.status == "success" else None,
             category=result.category,
             message=result.message if result.category == "other" else None,
+            pr_url=result.pr_url,
         )
         self._save_state()
 
         # Show result
         self._print_result(result)
+
+        # Any publish failure ends the run: every further PR would cost a full Claude
+        # Code session and then fail at the same wall.
+        if self._check_publish_health(result):
+            return
 
         # Rate limit protection: sleep between PRs
         self.console.print(f"[dim]Waiting {self.config.task_delay} seconds before next PR...[/dim]")
@@ -250,6 +275,36 @@ class StreamFarmer:
             if self.state.total_processed % self.config.docker_prune_batch == 0:
                 self._prune_docker()
 
+    def _check_publish_health(self, result: TaskResult) -> bool:
+        """Stop the run on any publish failure. Returns True if farming should stop.
+
+        No retry-and-continue: a rejected push cannot be distinguished from a broken
+        remote, and continuing would spend a full Claude Code session per PR only to
+        fail at the same wall. Stopping loudly is what lets an operator reach a Daytona
+        sandbox and recover the task before it is reclaimed.
+        """
+        if result.category != "publish_failed":
+            return False
+
+        self.aborted = True
+        self.shutdown_requested = True
+        self.console.print(
+            Panel(
+                Text(
+                    f"{result.message}\n\n"
+                    f"The task passed every validation gate and was left in "
+                    f"{self.tasks_root}/{result.task_id} - it can be pushed by hand.\n"
+                    f"On an ephemeral sandbox, recover it before the sandbox is reclaimed.\n\n"
+                    f"Fix the token or GitHub connectivity, then re-run - farm state is "
+                    f"preserved, so processed PRs will not be regenerated.",
+                    style="red",
+                ),
+                title="[red]Stopping: could not publish task[/red]",
+                border_style="red",
+            )
+        )
+        return True
+
     def _print_result(self, result: TaskResult) -> None:
         """Print the result of processing a PR.
 
@@ -258,6 +313,8 @@ class StreamFarmer:
         """
         if result.status == "success":
             self.console.print(f"[green]✓ Success: {result.message}[/green]")
+            if result.pr_url:
+                self.console.print(f"[green]  PR: {result.pr_url}[/green]")
         elif result.status == "dry-run":
             self.console.print(f"[cyan]○ Dry-run: {result.message}[/cyan]")
         else:
@@ -295,7 +352,13 @@ class StreamFarmer:
         )
 
     def _prune_docker(self) -> None:
-        """Run docker cleanup to free disk space."""
+        """Run docker cleanup to free disk space.
+
+        WARNING: `docker system prune -af` is global to the daemon. Two farm processes
+        sharing a host will destroy each other's images and build cache mid-validation.
+        One container per repo is the intended deployment; if you colocate farms, pass
+        --docker-prune-batch 0 to all but one.
+        """
         if shutil.which("docker") is None:
             self.console.print(
                 "[yellow]Skipping docker prune (docker binary not found in PATH).[/yellow]"
@@ -341,8 +404,13 @@ class StreamFarmer:
             self.console.print("[red]Docker prune timed out after 600s[/red]")
 
     def _save_state(self) -> None:
-        """Save state to file."""
-        self.state.save(self.state_file)
+        """Persist state via the configured store.
+
+        With publishing enabled this pushes to the state branch, so a sandbox killed
+        mid-run resumes from the last completed PR. _finalize() runs from a finally
+        block, which means a Daytona SIGTERM flushes state before exit.
+        """
+        self.state_store.save(self.state)
 
     def _finalize(self) -> None:
         """Finalize the run and print summary."""
@@ -383,6 +451,8 @@ class StreamFarmer:
                 table.add_row("  Timeouts", str(len(self.state.timeout_prs)))
             if self.state.git_error_prs:
                 table.add_row("  Git Errors", str(len(self.state.git_error_prs)))
+            if self.state.publish_failed_prs:
+                table.add_row("  Publish Failed", str(len(self.state.publish_failed_prs)))
             if self.state.other_failed_prs:
                 table.add_row("  Other Errors", str(len(self.state.other_failed_prs)))
 

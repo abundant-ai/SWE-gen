@@ -14,6 +14,7 @@ from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
 from swegen.create.create import run_reversal
 from swegen.create.task_reference import TaskReferenceStore
+from swegen.publish import PublishError
 
 
 def _now_utc() -> datetime:
@@ -57,6 +58,7 @@ class TaskResult:
     duration_seconds: float
     timestamp: str
     category: str = None  # Category for detailed tracking
+    pr_url: str = None  # URL of the published task PR, if publishing is enabled
 
 
 def _cleanup_task(task_id: str, tasks_root: Path, console: Console) -> None:
@@ -86,9 +88,14 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
     - quota_exceeded: OpenAI quota exceeded
     - timeout: Command timeout
     - git_error: Git checkout/commit errors
+    - publish_failed: Task built but could not be pushed/PR'd
     - other: Unknown/other errors
     """
     lowered = stderr.lower()
+    # Checked first: a publish error wraps git/HTTP output that would otherwise match
+    # the "timeout" or "git" heuristics below.
+    if "publish failed" in lowered:
+        return "publish_failed", (stderr or "Publish failed").replace("\n", " ")
     if "trivial" in stderr:
         return "trivial", "Trivial PR (skipped)"
     if "no linked issue" in lowered or "missingissueerror" in lowered:
@@ -119,10 +126,14 @@ def _print_success(
     pr: PRCandidate,
     task_id: str,
     harbor_dir: Path,
+    pr_url: str | None = None,
 ) -> None:
+    body = f"🎉 Successfully generated task\n[bold]{task_id}[/bold]\nHarbor: {harbor_dir}"
+    if pr_url:
+        body += f"\nPublished: {pr_url}"
     console.print(
         Panel.fit(
-            f"🎉 Successfully generated task\n[bold]{task_id}[/bold]\nHarbor: {harbor_dir}",
+            body,
             title=f"PR #{pr.number}",
             border_style="green",
         )
@@ -219,17 +230,26 @@ def _run_reversal_for_pr_impl(
         require_issue=config.require_issue,
         environment=config.environment,
         enforce_offline_tests=config.enforce_offline_tests,
+        publish=config.publish,
     )
 
     # Capture any errors from the pipeline
     success = False
     error_msg = ""
     error_category = None
+    pr_url: str | None = None
 
     try:
         # Call the pipeline directly instead of using subprocess
-        run_reversal(create_config)
+        pr_url = run_reversal(create_config)
         success = True
+    except PublishError as e:
+        # Task was built and validated but never reached the dataset repo. The farmer
+        # stops the run on this category rather than burning a Claude Code session on
+        # the next PR just to fail at the same wall.
+        error_msg = f"Publish failed: {e}"
+        error_category = "publish_failed"
+        success = False
     except TrivialPRError as e:
         # Trivial PR - not an error, just skip it
         error_msg = str(e)
@@ -287,7 +307,7 @@ def _run_reversal_for_pr_impl(
         duration = time.time() - start
         gate_ok, gate_msg = _gate_task(task_id, tasks_root)
         if gate_ok:
-            _print_success(console, pr, task_id, harbor_dir)
+            _print_success(console, pr, task_id, harbor_dir, pr_url)
 
             # Save task reference for future PRs
             try:
@@ -309,6 +329,7 @@ def _run_reversal_for_pr_impl(
                 duration_seconds=round(duration, 2),
                 timestamp=_now_utc().isoformat(),
                 category=None,
+                pr_url=pr_url,
             )
 
         # Gate failed
@@ -329,7 +350,17 @@ def _run_reversal_for_pr_impl(
 
     # Pipeline failed
     failure_category, failure_reason = _classify_failure(error_msg)
-    _cleanup_task(task_id, tasks_root, console)
+
+    if failure_category == "publish_failed":
+        # The task itself is valid - it passed every gate and only the push/PR failed.
+        # Keep it on disk so it can be published by hand or by a re-run.
+        console.print(
+            f"[yellow]Keeping task directory {tasks_root / task_id} "
+            f"(validated but unpublished)[/yellow]"
+        )
+    else:
+        _cleanup_task(task_id, tasks_root, console)
+
     console.print(f"[red]✗ PR #{pr.number}: {failure_reason}[/red]")
     return TaskResult(
         repo=config.repo,
