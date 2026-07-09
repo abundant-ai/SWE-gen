@@ -16,7 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from swegen.config import FarmConfig
-from swegen.publish import build_state_store, build_task_sink
+from swegen.publish import PublishError, build_state_store, build_task_sink
 
 from .farm_hand import (
     PRCandidate,
@@ -86,6 +86,15 @@ class StreamFarmer:
         if config.reset:
             self.state = StreamState(repo=repo)
             self.console.print("[yellow]State reset - starting fresh[/yellow]")
+            if config.publish is not None:
+                # --reset means "start from the beginning", and it does. But with a remote
+                # state branch that discards a cursor shared across sandboxes, not just a
+                # local file: every PR recorded there will be regenerated from scratch.
+                self.console.print(
+                    f"[bold yellow]WARNING: --reset will overwrite the durable state "
+                    f"branch {self.state_store.branch} on {config.publish.repo} at the "
+                    f"first save. Previously processed PRs will be regenerated.[/bold yellow]"
+                )
         else:
             self.state = self.state_store.load(repo)
 
@@ -243,16 +252,22 @@ class StreamFarmer:
         self.results.append(result)
 
         # Mark as processed with detailed tracking
-        self.state.mark_processed(
-            pr.number,
-            pr.created_at,
-            result.status == "success",
-            task_id=result.task_id if result.status == "success" else None,
-            category=result.category,
-            message=result.message if result.category == "other" else None,
-            pr_url=result.pr_url,
-        )
-        self._save_state()
+        if result.category == "publish_failed":
+            # Do NOT consume the PR. The task is valid and only publishing failed, so the
+            # next run must retry it rather than skip it. Publishing is idempotent: it
+            # finds the stale branch, recommits, and opens the PR that never got created.
+            self.state.mark_publish_failed(pr.number)
+        else:
+            self.state.mark_processed(
+                pr.number,
+                pr.created_at,
+                result.status == "success",
+                task_id=result.task_id if result.status == "success" else None,
+                category=result.category,
+                message=result.message if result.category == "other" else None,
+                pr_url=result.pr_url,
+            )
+        state_saved = self._save_state()
 
         # Show result
         self._print_result(result)
@@ -260,6 +275,16 @@ class StreamFarmer:
         # Any publish failure ends the run: every further PR would cost a full Claude
         # Code session and then fail at the same wall.
         if self._check_publish_health(result):
+            return
+
+        # A state push that fails is equally fatal: without a durable cursor a resumed
+        # sandbox would redo every PR from here.
+        if not state_saved:
+            self._abort(
+                "Farm state could not be pushed to the state branch. Continuing would "
+                "leave the durable cursor stale, so a resumed sandbox would regenerate "
+                "every PR processed from this point on."
+            )
             return
 
         # Rate limit protection: sleep between PRs
@@ -275,6 +300,21 @@ class StreamFarmer:
             if self.state.total_processed % self.config.docker_prune_batch == 0:
                 self._prune_docker()
 
+    def _abort(self, reason: str, detail: str = "") -> None:
+        """Stop the run loudly, so an operator can reach the sandbox before reclamation."""
+        self.aborted = True
+        self.shutdown_requested = True
+        body = reason
+        if detail:
+            body += f"\n\n{detail}"
+        body += (
+            "\n\nFix the token or GitHub connectivity, then re-run. Farm state is "
+            "preserved, so already-processed PRs will not be regenerated."
+        )
+        self.console.print(
+            Panel(Text(body, style="red"), title="[red]Stopping[/red]", border_style="red")
+        )
+
     def _check_publish_health(self, result: TaskResult) -> bool:
         """Stop the run on any publish failure. Returns True if farming should stop.
 
@@ -286,22 +326,12 @@ class StreamFarmer:
         if result.category != "publish_failed":
             return False
 
-        self.aborted = True
-        self.shutdown_requested = True
-        self.console.print(
-            Panel(
-                Text(
-                    f"{result.message}\n\n"
-                    f"The task passed every validation gate and was left in "
-                    f"{self.tasks_root}/{result.task_id} - it can be pushed by hand.\n"
-                    f"On an ephemeral sandbox, recover it before the sandbox is reclaimed.\n\n"
-                    f"Fix the token or GitHub connectivity, then re-run - farm state is "
-                    f"preserved, so processed PRs will not be regenerated.",
-                    style="red",
-                ),
-                title="[red]Stopping: could not publish task[/red]",
-                border_style="red",
-            )
+        self._abort(
+            result.message,
+            f"The task passed every validation gate and was left in "
+            f"{self.tasks_root}/{result.task_id} - it can be pushed by hand.\n"
+            f"On an ephemeral sandbox, recover it before the sandbox is reclaimed.\n"
+            f"PR #{result.pr_number} was left unprocessed, so a re-run will retry it.",
         )
         return True
 
@@ -403,14 +433,23 @@ class StreamFarmer:
         except subprocess.TimeoutExpired:
             self.console.print("[red]Docker prune timed out after 600s[/red]")
 
-    def _save_state(self) -> None:
-        """Persist state via the configured store.
+    def _save_state(self) -> bool:
+        """Persist state via the configured store. Returns False if it could not be saved.
 
         With publishing enabled this pushes to the state branch, so a sandbox killed
         mid-run resumes from the last completed PR. _finalize() runs from a finally
         block, which means a Daytona SIGTERM flushes state before exit.
+
+        A failure here is as serious as a failed task publish: if the state branch stops
+        advancing, a resumed sandbox redoes work it already paid for. The caller stops
+        the run. The local mirror is still written, so nothing is lost from disk.
         """
-        self.state_store.save(self.state)
+        try:
+            self.state_store.save(self.state)
+            return True
+        except PublishError as e:
+            self.console.print(f"[red]Could not persist farm state: {e}[/red]")
+            return False
 
     def _finalize(self) -> None:
         """Finalize the run and print summary."""

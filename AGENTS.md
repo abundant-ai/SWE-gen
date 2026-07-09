@@ -126,6 +126,22 @@ Tasks that fail to publish are **kept on disk** (unlike other failures, which ar
 up): they passed every validation gate, so they are valid work that can be pushed by hand or
 by a re-run. Farm state is preserved, so a re-run does not regenerate already-processed PRs.
 
+The source PR is **not marked processed** on a publish failure, so a re-run retries it. This
+is the recovery path for a push that succeeds and a `create_pr` that then fails: the retry
+finds the stale branch, recommits, and opens the PR that never got created. Marking it
+processed would strand a branch on the remote with no PR and no way to reach it again.
+
+A failed **state push** is equally fatal and also stops the run. If the state branch stops
+advancing, a resumed sandbox works from a stale cursor and repeats hours of Claude Code on
+PRs it already handled. The local mirror is still written, so nothing is lost from disk.
+
+`swegen create` publishes **before** writing its `create.jsonl` dedupe record. Recording a
+task that was never published would make the next run skip it as a duplicate, with no way to
+retry the publish short of `--force`.
+
+`--reset` with `--publish-repo` overwrites the durable state branch, not just a local file —
+every PR recorded there gets regenerated. The farm prints a warning; the behavior is intended.
+
 `GIT_TOKEN` is separate from `GITHUB_TOKEN` (read-only, used to fetch source PRs) so a farm
 run can read from anywhere while only ever writing to one repo. It falls back to
 `GITHUB_TOKEN` if unset.

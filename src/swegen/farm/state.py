@@ -144,14 +144,28 @@ class StreamState:
                 self.timeout_prs.add(pr_number)
             elif category == "git_error":
                 self.git_error_prs.add(pr_number)
-            elif category == "publish_failed":
-                self.publish_failed_prs.add(pr_number)
             else:
                 # Other/unknown error
                 self.other_failed_prs[pr_number] = message or "Unknown error"
         
         self.last_pr_number = pr_number
         self.last_created_at = created_at
+        self.last_updated = datetime.now(UTC).isoformat()
+
+    def mark_publish_failed(self, pr_number: int) -> None:
+        """Record a publish failure WITHOUT consuming the PR.
+
+        Deliberately does not add to processed_prs or advance last_created_at: the task
+        was generated and validated, and only the push/PR failed. Leaving the PR
+        unprocessed means the next run retries it, and the publish path is idempotent -
+        it finds the stale branch, recommits, and opens the PR that never got created.
+
+        This is the recovery path for a push that succeeds and a create_pr that then
+        fails, which would otherwise strand a branch on the remote with no PR and no way
+        for the farm to reach it again.
+        """
+        self.failed += 1
+        self.publish_failed_prs.add(pr_number)
         self.last_updated = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict:

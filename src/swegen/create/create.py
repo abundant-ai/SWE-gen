@@ -17,7 +17,7 @@ from rich.text import Text
 from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
-from swegen.publish import PublishContext, PublishError, build_task_sink
+from swegen.publish import PublishContext, PublishError, TaskSink, build_task_sink
 from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
 from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
@@ -282,9 +282,25 @@ def _save_state_record(
         logger.warning(f"Unexpected error saving state record for {repo_key}: {e}", exc_info=True)
 
 
+def _preflight_publish(console: Console, config: CreateConfig, repo: str) -> TaskSink:
+    """Build the sink and verify the dataset repo is writable, before any work begins.
+
+    Called up front so a bad token fails in seconds rather than after a full Claude Code
+    session and Harbor validation have already been paid for.
+    """
+    sink = build_task_sink(config.publish, repo, state_dir=config.state_dir)
+    if config.publish is not None:
+        console.print(
+            f"[cyan]Publishing to {config.publish.repo} (base: {config.publish.base_branch})[/cyan]"
+        )
+        sink.preflight()
+    return sink
+
+
 def _publish_task(
     console: Console,
     config: CreateConfig,
+    sink: TaskSink,
     repo: str,
     pr: int,
     task_id: str,
@@ -297,9 +313,14 @@ def _publish_task(
     that failed validation. Raises PublishError on failure - an unpublished task is
     lost when an ephemeral sandbox dies, so it is not a success.
 
+    Must run BEFORE the dedupe record is written: a task recorded in create.jsonl but
+    never published cannot be retried without --force.
+
     Returns the PR URL, or None when publishing is disabled or dry-run.
     """
-    sink = build_task_sink(config.publish, repo, state_dir=config.state_dir)
+    if config.publish is None:
+        return None
+
     ctx = PublishContext(
         task_id=task_id,
         task_dir=task_dir,
@@ -308,9 +329,6 @@ def _publish_task(
         source_pr_url=metadata.get("html_url", f"https://github.com/{repo}/pull/{pr}"),
         metadata=metadata,
     )
-
-    if config.publish is None:
-        return None
 
     console.print(Rule(Text("Publish", style="bold blue")))
     result = sink.publish(ctx)
@@ -482,6 +500,10 @@ def run_reversal(config: CreateConfig) -> str | None:
         state_file = state_dir / "create.jsonl"
         if _check_dedupe(console, repo_key, state_file, config.force):
             return
+
+        # Verify the dataset repo is writable before spending a Claude Code session on a
+        # task we would then be unable to publish.
+        sink = _preflight_publish(console, config, pipeline.repo)
 
         harbor_root = config.output
         harbor_root.mkdir(parents=True, exist_ok=True)
@@ -708,15 +730,16 @@ def run_reversal(config: CreateConfig) -> str | None:
             console, harbor_validation_failed, cc_validation_failed, harbor_actually_ran
         )
 
+        # Publish before recording the dedupe entry. A task written to create.jsonl but
+        # never published would be skipped by the next run's dedupe check, leaving no way
+        # to retry the publish without --force.
+        pr_url = _publish_task(
+            console, config, sink, pipeline.repo, config.pr, task_id, task_dir, metadata
+        )
+
         # Save state record (non-fatal if fails)
         _save_state_record(
             state_dir, state_file, repo_key, pipeline.repo, config.pr, task_id, task_dir
-        )
-
-        # Publish the task before anything else can go wrong. On ephemeral sandboxes
-        # this is the only durable copy of the task.
-        pr_url = _publish_task(
-            console, config, pipeline.repo, config.pr, task_id, task_dir, metadata
         )
 
         # Display final panels

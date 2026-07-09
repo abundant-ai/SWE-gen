@@ -7,6 +7,7 @@ from pathlib import Path
 from swegen.config import PublishConfig
 from swegen.farm.state import StreamState
 
+from .base import PublishError
 from .git_ops import GitRepo, slug
 
 
@@ -95,11 +96,15 @@ class GitStateStore:
         return state
 
     def save(self, state: StreamState) -> None:
-        """Commit and push state.
+        """Commit and push state. Raises PublishError if it cannot be published.
 
-        Non-fatal: a failed state push is retried on the next PR and again from
-        _finalize(), so one transient failure should not abort a farm run. It is logged
-        at warning level because silently losing state would cost hours of rework.
+        Not swallowed: if the state branch stops advancing, a reclaimed sandbox resumes
+        from a stale cursor and repeats hours of Claude Code work on PRs already handled.
+        That is exactly the failure this class exists to prevent, so the caller stops the
+        run instead of farming blind.
+
+        The local mirror is written first, so state survives on disk even when the push
+        fails and can be recovered from the sandbox before it is reclaimed.
         """
         if self.local_mirror is not None:
             state.save(self.local_mirror)
@@ -107,8 +112,10 @@ class GitStateStore:
         try:
             self._ensure_worktree()
             self._write_and_push(state)
+        except PublishError:
+            raise
         except Exception as e:
-            self.logger.warning("Could not publish farm state to %s: %s", self.branch, e)
+            raise PublishError(f"Could not publish farm state to {self.branch}: {e}") from e
 
     def _write_and_push(self, state: StreamState) -> None:
         rel_path = f"{self.cfg.state_path}/{slug(self.source_repo)}.json"
