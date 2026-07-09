@@ -452,8 +452,19 @@ class StreamFarmer:
             return False
 
     def _finalize(self) -> None:
-        """Finalize the run and print summary."""
-        self._save_state()
+        """Finalize the run and print summary.
+
+        Runs from a finally block, so a Daytona SIGTERM flushes state before exit. A final
+        state push that fails is recorded as an abort: the durable cursor is now behind the
+        work actually done, and a resumed sandbox would redo it. Exiting 0 would tell a
+        supervisor everything was fine.
+        """
+        if not self._save_state():
+            self.aborted = True
+            self.console.print(
+                "[red]Final state push failed - the durable cursor is stale. "
+                "Recover the local state mirror before this sandbox is reclaimed.[/red]"
+            )
         self._save_log()
 
         self.console.print("\n")

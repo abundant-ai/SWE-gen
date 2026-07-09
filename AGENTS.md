@@ -131,9 +131,21 @@ is the recovery path for a push that succeeds and a `create_pr` that then fails:
 finds the stale branch, recommits, and opens the PR that never got created. Marking it
 processed would strand a branch on the remote with no PR and no way to reach it again.
 
-A failed **state push** is equally fatal and also stops the run. If the state branch stops
-advancing, a resumed sandbox works from a stale cursor and repeats hours of Claude Code on
-PRs it already handled. The local mirror is still written, so nothing is lost from disk.
+A failed **state push** is equally fatal and also stops the run, including the final push in
+`_finalize()` (which sets a nonzero exit code). If the state branch stops advancing, a
+resumed sandbox works from a stale cursor and repeats hours of Claude Code on PRs it already
+handled. The local mirror is still written, so nothing is lost from disk.
+
+If a state push is rejected because the remote moved, the loser **merges** rather than
+overwrites: `StreamState.merge_from` unions the processed-PR sets and keeps the newer cursor
+(newer skips less; `processed_prs` is the authoritative skip list). Blindly recommitting an
+in-memory snapshot would erase whatever the other writer just published. One container per
+repo means this should never trigger, but losing a durable cursor is not worth the gamble.
+
+Counters (`successful` / `failed` / `total_processed`) are **derived** from the recorded sets
+on every mutation, never incremented in place. A PR can move between categories — a publish
+failure that later succeeds on retry — and a merge unions two states; incremental counting
+drifts in both cases.
 
 `swegen create` publishes **before** writing its `create.jsonl` dedupe record. Recording a
 task that was never published would make the next run skip it as a duplicate, with no way to

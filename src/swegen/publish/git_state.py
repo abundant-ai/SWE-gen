@@ -65,28 +65,31 @@ class GitStateStore:
 
     # -- StateStore protocol -------------------------------------------------
 
-    def load(self, repo: str) -> StreamState:
-        self._ensure_worktree()
-
+    def _read_state_file(self, repo: str) -> StreamState | None:
+        """Parse the state file in the worktree, or None if absent/unusable."""
         if not self.state_file.exists():
-            self.logger.info("No published state for %s; starting fresh", repo)
-            return StreamState(repo=repo)
+            return None
 
         try:
             data = json.loads(self.state_file.read_text())
         except (OSError, ValueError) as e:
-            self.logger.warning(
-                "Published state for %s is unreadable (%s); starting fresh", repo, e
-            )
-            return StreamState(repo=repo)
+            self.logger.warning("Published state for %s is unreadable (%s)", repo, e)
+            return None
 
         if data.get("repo") != repo:
-            self.logger.warning(
-                "Published state is for %s, not %s; starting fresh", data.get("repo"), repo
-            )
+            self.logger.warning("Published state is for %s, not %s", data.get("repo"), repo)
+            return None
+
+        return StreamState.from_dict(data)
+
+    def load(self, repo: str) -> StreamState:
+        self._ensure_worktree()
+
+        state = self._read_state_file(repo)
+        if state is None:
+            self.logger.info("No usable published state for %s; starting fresh", repo)
             return StreamState(repo=repo)
 
-        state = StreamState.from_dict(data)
         self.logger.info(
             "Resumed published state for %s: %d PRs processed, %d tasks published",
             repo,
@@ -126,12 +129,19 @@ class GitStateStore:
             self.git.push(refspec, cwd=self.worktree)
             return
         except Exception as e:
-            self.logger.warning("State push rejected (%s); rebasing onto remote and retrying", e)
+            self.logger.warning("State push rejected (%s); merging with remote and retrying", e)
 
-        # The remote moved under us. Our state is a full snapshot, so reset onto the
-        # remote tip and re-apply it as an additive commit rather than force-pushing.
+        # The remote moved under us. Reset onto the remote tip, then MERGE the remote's
+        # state into ours before recommitting. Blindly recommitting our in-memory snapshot
+        # would discard whatever cursor the other writer just published, losing PRs it had
+        # already processed. Merging is a union, so neither side forgets work.
         self.git.git("fetch", "origin", self.branch, cwd=self.worktree, network=True)
         self.git.git("reset", "--hard", f"origin/{self.branch}", cwd=self.worktree)
+
+        remote_state = self._read_state_file(state.repo)
+        if remote_state is not None:
+            state.merge_from(remote_state)
+
         self._commit_state(state, rel_path)
         self.git.push(refspec, cwd=self.worktree)
 

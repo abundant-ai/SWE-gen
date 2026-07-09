@@ -117,6 +117,11 @@ class StreamState:
         self.processed_prs.add(pr_number)
         self.total_processed += 1
 
+        # A PR reaching a terminal outcome is no longer a pending publish failure. Without
+        # this, a successful retry would leave the PR in publish_failed_prs forever and the
+        # durable state / summaries would keep reporting a failure that has been resolved.
+        self.publish_failed_prs.discard(pr_number)
+
         if success:
             self.successful += 1
             if task_id:
@@ -151,6 +156,35 @@ class StreamState:
         self.last_pr_number = pr_number
         self.last_created_at = created_at
         self.last_updated = datetime.now(UTC).isoformat()
+        self._recompute_counters()
+
+    def _failed_pr_numbers(self) -> set[int]:
+        """Every PR with a recorded failure or skip, across all categories."""
+        return (
+            self.trivial_prs
+            | self.no_issue_prs
+            | self.no_tests_prs
+            | self.validation_failed_prs
+            | self.already_exists_prs
+            | self.rate_limit_prs
+            | self.quota_exceeded_prs
+            | self.timeout_prs
+            | self.git_error_prs
+            | self.publish_failed_prs
+            | set(self.other_failed_prs)
+        )
+
+    def _recompute_counters(self) -> None:
+        """Derive counters from the recorded sets rather than incrementing blindly.
+
+        Counters must be derived, not accumulated: a PR can move between categories (a
+        publish failure that later succeeds on retry), and a merge can union two states.
+        Incremental counting drifts in both cases and the durable state reports failures
+        that no longer exist.
+        """
+        self.successful = len(self.successful_prs)
+        self.failed = len(self._failed_pr_numbers())
+        self.total_processed = len(self.processed_prs)
 
     def mark_publish_failed(self, pr_number: int) -> None:
         """Record a publish failure WITHOUT consuming the PR.
@@ -164,9 +198,56 @@ class StreamState:
         fails, which would otherwise strand a branch on the remote with no PR and no way
         for the farm to reach it again.
         """
-        self.failed += 1
         self.publish_failed_prs.add(pr_number)
         self.last_updated = datetime.now(UTC).isoformat()
+        self._recompute_counters()
+
+    def merge_from(self, other: StreamState) -> None:
+        """Union `other` into this state, in place.
+
+        Used when a state push is rejected because the remote moved: rather than
+        hard-overwriting a cursor another writer just published, we take the union so no
+        processed PR is forgotten.
+
+        last_created_at takes the NEWER of the two. The stream is created-descending and
+        skips PRs created at or after the cursor, so a newer cursor skips less. Anything
+        it re-visits is caught by processed_prs, which is the authoritative skip list. An
+        older cursor could permanently skip PRs neither writer had processed.
+        """
+        if other.repo != self.repo:
+            raise ValueError(f"Cannot merge state for {other.repo} into {self.repo}")
+
+        self.processed_prs |= other.processed_prs
+        self.skip_list_prs |= other.skip_list_prs
+        self.trivial_prs |= other.trivial_prs
+        self.no_issue_prs |= other.no_issue_prs
+        self.no_tests_prs |= other.no_tests_prs
+        self.validation_failed_prs |= other.validation_failed_prs
+        self.already_exists_prs |= other.already_exists_prs
+        self.rate_limit_prs |= other.rate_limit_prs
+        self.quota_exceeded_prs |= other.quota_exceeded_prs
+        self.timeout_prs |= other.timeout_prs
+        self.git_error_prs |= other.git_error_prs
+
+        # Ours wins on key collision: this run has the more recent outcome.
+        self.successful_prs = {**other.successful_prs, **self.successful_prs}
+        self.task_pr_urls = {**other.task_pr_urls, **self.task_pr_urls}
+        self.other_failed_prs = {**other.other_failed_prs, **self.other_failed_prs}
+
+        # A PR published by either writer is no longer a pending publish failure.
+        self.publish_failed_prs |= other.publish_failed_prs
+        self.publish_failed_prs -= set(self.successful_prs)
+        self.publish_failed_prs -= self.processed_prs
+
+        self.total_fetched = max(self.total_fetched, other.total_fetched)
+        if other.last_created_at and (
+            not self.last_created_at or other.last_created_at > self.last_created_at
+        ):
+            self.last_created_at = other.last_created_at
+            self.last_pr_number = other.last_pr_number
+
+        self.last_updated = datetime.now(UTC).isoformat()
+        self._recompute_counters()
 
     def to_dict(self) -> dict:
         """Convert to dict for JSON serialization."""

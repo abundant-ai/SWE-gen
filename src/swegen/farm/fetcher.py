@@ -209,10 +209,14 @@ class StreamingPRFetcher:
 
                 # Skip if this PR was created after our resume time
                 # (we're working backwards, so we only want PRs created before the resume point)
+                # Exception: a PR whose task was built but never published is always retried.
+                # The stream is created-desc, so such a PR is normally older than the cursor
+                # and passes anyway - but it shares the cursor's timestamp on a tie, and >=
+                # would otherwise strand it forever.
                 if resume_from_time is not None and created_at:
                     pr_created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                     resume_dt = datetime.fromisoformat(resume_from_time.replace("Z", "+00:00"))
-                    if pr_created_dt >= resume_dt:
+                    if pr_created_dt >= resume_dt and pr_number not in self.state.publish_failed_prs:
                         skipped_stats["after_resume_time"] += 1
                         continue
 
