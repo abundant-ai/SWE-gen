@@ -151,6 +151,16 @@ drifts in both cases.
 task that was never published would make the next run skip it as a duplicate, with no way to
 retry the publish short of `--force`.
 
+A **dedupe hit publishes the existing task** rather than returning early. A task on disk is
+not proof it reached the dataset repo — it may predate publishing, or belong to a run whose
+push failed. Returning silently would let the farm mark the source PR processed with no PR
+ever opened. Publishing is idempotent, so a task already published just yields its PR URL.
+
+`GitStateStore.load` merges the **local mirror** into the state branch. The mirror is written
+before every push, so a failed push leaves it ahead of the branch; reading only the remote
+would forget those PRs and drop `publish_failed_prs`, which the fetcher needs to know a PR
+still awaits its PR.
+
 `--reset` with `--publish-repo` overwrites the durable state branch, not just a local file —
 every PR recorded there gets regenerated. The farm prints a warning; the behavior is intended.
 

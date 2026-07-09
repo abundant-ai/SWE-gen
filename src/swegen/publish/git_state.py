@@ -82,13 +82,50 @@ class GitStateStore:
 
         return StreamState.from_dict(data)
 
+    def _read_local_mirror(self, repo: str) -> StreamState | None:
+        """Parse the local mirror, or None if absent/unusable."""
+        if self.local_mirror is None or not Path(self.local_mirror).exists():
+            return None
+        try:
+            data = json.loads(Path(self.local_mirror).read_text())
+        except (OSError, ValueError) as e:
+            self.logger.warning("Local state mirror is unreadable (%s); ignoring", e)
+            return None
+        if data.get("repo") != repo:
+            return None
+        return StreamState.from_dict(data)
+
     def load(self, repo: str) -> StreamState:
+        """Resume from the published state, folding in any fresher local mirror.
+
+        The mirror is written before every push, so if a push failed the mirror is ahead
+        of the branch. Reading only the remote would forget those PRs - they would be
+        regenerated - and would drop publish_failed_prs, which the fetcher needs to know
+        that a PR is still awaiting its PR. Merging is a union, so neither source loses.
+        """
         self._ensure_worktree()
 
         state = self._read_state_file(repo)
+        local = self._read_local_mirror(repo)
+
         if state is None:
-            self.logger.info("No usable published state for %s; starting fresh", repo)
-            return StreamState(repo=repo)
+            if local is None:
+                self.logger.info("No usable published state for %s; starting fresh", repo)
+                return StreamState(repo=repo)
+            self.logger.info("No published state for %s; resuming from local mirror", repo)
+            return local
+
+        if local is not None:
+            before = len(state.processed_prs)
+            state.merge_from(local)
+            recovered = len(state.processed_prs) - before
+            if recovered or local.publish_failed_prs:
+                self.logger.info(
+                    "Local mirror was ahead of the state branch: recovered %d processed PRs, "
+                    "%d pending publish failures",
+                    recovered,
+                    len(state.publish_failed_prs),
+                )
 
         self.logger.info(
             "Resumed published state for %s: %d PRs processed, %d tasks published",
@@ -129,6 +166,11 @@ class GitStateStore:
             self.git.push(refspec, cwd=self.worktree)
             return
         except Exception as e:
+            # The merge recovery below only makes sense if the remote branch exists. When
+            # it does not, the push failed for some other reason (network, auth, hook) and
+            # `fetch origin <branch>` would fail too, masking the real error.
+            if not self.git.remote_branch_exists(self.branch):
+                raise
             self.logger.warning("State push rejected (%s); merging with remote and retrying", e)
 
         # The remote moved under us. Reset onto the remote tip, then MERGE the remote's

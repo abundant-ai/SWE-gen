@@ -90,13 +90,15 @@ def _check_dedupe(
     repo_key: str,
     state_file: Path,
     force: bool,
-) -> bool:
+) -> dict | None:
     """Check if task already exists in state file.
 
-    Returns True if duplicate found and should skip, False otherwise.
+    Returns the recorded state entry if a duplicate is found, else None. The caller needs
+    the record - not just a bool - because a previously generated task may still be
+    unpublished, and its recorded directory is where the task lives.
     """
     if force or not state_file.exists():
-        return False
+        return None
 
     last_rec = None
     logger = logging.getLogger("swegen")
@@ -122,8 +124,8 @@ def _check_dedupe(
                 border_style="yellow",
             )
         )
-        return True
-    return False
+        return last_rec
+    return None
 
 
 def _display_validation_results(
@@ -295,6 +297,38 @@ def _preflight_publish(console: Console, config: CreateConfig, repo: str) -> Tas
         )
         sink.preflight()
     return sink
+
+
+def _publish_existing_task(
+    console: Console,
+    config: CreateConfig,
+    repo: str,
+    pr: int,
+    record: dict,
+) -> str | None:
+    """Publish a task that dedupe says was already generated.
+
+    A dedupe hit means the task exists on disk, NOT that it reached the dataset repo -
+    it may have been generated before publishing was configured, or by a run whose push
+    failed. Returning silently would let the farm mark the source PR processed with no PR
+    ever opened. Publishing is idempotent, so re-publishing an already-published task
+    returns its existing PR URL.
+    """
+    if config.publish is None:
+        return None
+
+    task_dir = Path(record.get("harbor", ""))
+    task_id = record.get("task_id") or task_dir.name
+    if not task_dir.exists():
+        console.print(
+            f"[yellow]Task {task_id} is recorded in state but missing from disk "
+            f"({task_dir}); nothing to publish. Use --force to regenerate.[/yellow]"
+        )
+        return None
+
+    console.print(f"[cyan]Task already generated; publishing {task_id} from {task_dir}[/cyan]")
+    sink = _preflight_publish(console, config, repo)
+    return _publish_task(console, config, sink, repo, pr, task_id, task_dir, metadata={})
 
 
 def _publish_task(
@@ -498,8 +532,11 @@ def run_reversal(config: CreateConfig) -> str | None:
         repo_key = f"{pipeline.repo.lower()}#{config.pr}"
         state_dir: Path = config.state_dir or Path(".swegen")
         state_file = state_dir / "create.jsonl"
-        if _check_dedupe(console, repo_key, state_file, config.force):
-            return
+        duplicate = _check_dedupe(console, repo_key, state_file, config.force)
+        if duplicate is not None:
+            # The task exists on disk but may never have been published. Publish it rather
+            # than returning as if the work were done.
+            return _publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
 
         # Verify the dataset repo is writable before spending a Claude Code session on a
         # task we would then be unable to publish.
