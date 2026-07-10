@@ -133,6 +133,12 @@ is the recovery path for a push that succeeds and a `create_pr` that then fails:
 finds the stale branch, recommits, and opens the PR that never got created. Marking it
 processed would strand a branch on the remote with no PR and no way to reach it again.
 
+That retry is **publish-only**: the farm republishes the task already on disk rather than
+regenerating it. Regeneration runs with `force=True`, which `rmtree`s the task directory
+before rebuilding — throwing away a validated task to redo an hour of Claude Code, and losing
+it outright if the rebuild then fails. If the task is missing (a fresh sandbox), the retry
+falls back to full generation.
+
 A failed **state push** is equally fatal and also stops the run, including the final push in
 `_finalize()` (which sets a nonzero exit code). If the state branch stops advancing, a
 resumed sandbox works from a stale cursor and repeats hours of Claude Code on PRs it already

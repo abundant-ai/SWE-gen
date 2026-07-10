@@ -299,20 +299,23 @@ def _preflight_publish(console: Console, config: CreateConfig, repo: str) -> Tas
     return sink
 
 
-def _publish_existing_task(
+def publish_existing_task(
     console: Console,
     config: CreateConfig,
     repo: str,
     pr: int,
     record: dict,
 ) -> str | None:
-    """Publish a task that dedupe says was already generated.
+    """Publish a task that already exists on disk, without regenerating it.
 
-    A dedupe hit means the task exists on disk, NOT that it reached the dataset repo -
-    it may have been generated before publishing was configured, or by a run whose push
-    failed. Returning silently would let the farm mark the source PR processed with no PR
-    ever opened. Publishing is idempotent, so re-publishing an already-published task
-    returns its existing PR URL.
+    Used for two recoveries:
+      * a dedupe hit - the task exists but may never have reached the dataset repo
+      * a publish-only retry after a failed push, where regenerating would destroy the
+        validated task the farm deliberately preserved
+
+    Returning silently would let the farm mark the source PR processed with no PR ever
+    opened. Publishing is idempotent, so re-publishing an already-published task returns
+    its existing PR URL.
     """
     if config.publish is None:
         return None
@@ -536,7 +539,7 @@ def run_reversal(config: CreateConfig) -> str | None:
         if duplicate is not None:
             # The task exists on disk but may never have been published. Publish it rather
             # than returning as if the work were done.
-            return _publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
+            return publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
 
         # Verify the dataset repo is writable before spending a Claude Code session on a
         # task we would then be unable to publish.

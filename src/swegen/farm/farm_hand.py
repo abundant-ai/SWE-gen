@@ -12,7 +12,7 @@ from rich.panel import Panel
 
 from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
-from swegen.create.create import run_reversal
+from swegen.create.create import publish_existing_task, run_reversal
 from swegen.create.task_reference import TaskReferenceStore
 from swegen.publish import PublishError
 
@@ -157,11 +157,57 @@ def _gate_task(
     return True, f"Task generated successfully at {task_dir}"
 
 
+def _retry_publish_only(
+    pr: PRCandidate,
+    config: FarmConfig,
+    console: Console,
+    task_id: str,
+    harbor_dir: Path,
+    start: float,
+) -> TaskResult:
+    """Republish a task left on disk by an earlier publish failure.
+
+    Regenerating would call run_reversal with force=True, which rmtree's the task
+    directory before rebuilding it - destroying a validated task to redo an hour of
+    Claude Code, and losing it outright if the rebuild then fails. The task already
+    passed every gate; only the push did not.
+    """
+    console.print(
+        f"[cyan]PR #{pr.number}: task {task_id} was validated but never published; "
+        f"retrying publish only (no regeneration)[/cyan]"
+    )
+    create_config = CreateConfig(
+        repo=config.repo,
+        pr=pr.number,
+        output=config.output,
+        state_dir=config.state_dir,
+        verbose=config.verbose,
+        environment=config.environment,
+        publish=config.publish,
+    )
+    record = {"task_id": task_id, "harbor": str(harbor_dir)}
+    pr_url = publish_existing_task(console, create_config, config.repo, pr.number, record)
+
+    _print_success(console, pr, task_id, harbor_dir, pr_url)
+    return TaskResult(
+        repo=config.repo,
+        pr_number=pr.number,
+        task_id=task_id,
+        status="success",
+        message=f"Republished existing task at {harbor_dir}",
+        duration_seconds=round(time.time() - start, 2),
+        timestamp=_now_utc().isoformat(),
+        category=None,
+        pr_url=pr_url,
+    )
+
+
 def _run_reversal_for_pr(
     pr: PRCandidate,
     config: FarmConfig,
     tasks_root: Path,
     console: Console,
+    publish_only: bool = False,
 ) -> TaskResult:
     start = time.time()
     task_id = _task_id(config.repo, pr.number)
@@ -169,8 +215,31 @@ def _run_reversal_for_pr(
 
     # Wrap everything in try-except to catch unexpected errors
     try:
+        # A PR pending publication already has a validated task on disk. Publish it rather
+        # than regenerating, which would delete it.
+        if publish_only and config.publish is not None and harbor_dir.exists():
+            return _retry_publish_only(pr, config, console, task_id, harbor_dir, start)
+
         return _run_reversal_for_pr_impl(
             pr, config, tasks_root, console, task_id, harbor_dir, start
+        )
+    except PublishError as e:
+        # From the publish-only retry above. Never clean up: the task is validated and
+        # only publishing failed, so it must survive for the next attempt.
+        error_msg = f"Publish failed: {e}"
+        console.print(f"[red]✗ PR #{pr.number}: {error_msg}[/red]")
+        console.print(
+            f"[yellow]Keeping task directory {harbor_dir} (validated but unpublished)[/yellow]"
+        )
+        return TaskResult(
+            repo=config.repo,
+            pr_number=pr.number,
+            task_id=task_id,
+            status="failed",
+            message=error_msg,
+            duration_seconds=round(time.time() - start, 2),
+            timestamp=_now_utc().isoformat(),
+            category="publish_failed",
         )
     except Exception as e:
         # Catch any unexpected exception and return proper error

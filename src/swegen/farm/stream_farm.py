@@ -247,8 +247,14 @@ class StreamFarmer:
             f"+{pr.additions}/-{pr.deletions}[/dim]"
         )
 
+        # A PR left pending by an earlier publish failure already has a validated task on
+        # disk. Republish it instead of regenerating - force=True would delete it first.
+        publish_only = pr.number in self.state.publish_failed_prs
+
         # Process this PR completely before moving to next
-        result = _run_reversal_for_pr(pr, self.config, self.tasks_root, self.console)
+        result = _run_reversal_for_pr(
+            pr, self.config, self.tasks_root, self.console, publish_only=publish_only
+        )
         self.results.append(result)
 
         # Mark as processed with detailed tracking
