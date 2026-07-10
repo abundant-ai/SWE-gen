@@ -17,7 +17,7 @@ from rich.text import Text
 from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
-from swegen.publish import PublishContext, PublishError, TaskSink, build_task_sink
+from swegen.publish import PublishContext, PublishError, PublishResult, TaskSink, build_task_sink
 from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
 from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
@@ -339,7 +339,8 @@ def publish_existing_task(
 
     console.print(f"[cyan]Task already generated; publishing {task_id} from {task_dir}[/cyan]")
     sink = _preflight_publish(console, config, repo)
-    return _publish_task(console, config, sink, repo, pr, task_id, task_dir, metadata={})
+    result = _publish_task(console, config, sink, repo, pr, task_id, task_dir, metadata={})
+    return result.pr_url if result else None
 
 
 def _publish_task(
@@ -351,7 +352,7 @@ def _publish_task(
     task_id: str,
     task_dir: Path,
     metadata: dict,
-) -> str | None:
+) -> PublishResult | None:
     """Publish the validated task as a PR on the dataset repo.
 
     Runs only after every gate has passed, so the dataset repo never receives a task
@@ -361,7 +362,9 @@ def _publish_task(
     Must run BEFORE the dedupe record is written: a task recorded in create.jsonl but
     never published cannot be retried without --force.
 
-    Returns the PR URL, or None when publishing is disabled or dry-run.
+    Returns the full PublishResult (callers need `published`, not just the URL: a dry run
+    and an already-merged task both yield no URL but mean different things), or None when
+    publishing is disabled.
     """
     if config.publish is None:
         return None
@@ -381,7 +384,7 @@ def _publish_task(
         console.print(f"[green]✓ Published {task_id} → {result.pr_url}[/green]")
     elif config.publish.dry_run:
         console.print(f"[cyan]DRY RUN: would publish {task_id} on branch {result.branch}[/cyan]")
-    return result.pr_url
+    return result
 
 
 def _display_summary_panel(
@@ -808,7 +811,7 @@ def run_reversal(config: CreateConfig) -> str | None:
         # Publish before recording the dedupe entry, so a task that never reached the
         # dataset repo is not recorded as fully done.
         try:
-            pr_url = _publish_task(
+            publish_result = _publish_task(
                 console, config, sink, pipeline.repo, config.pr, task_id, task_dir, metadata
             )
         except PublishError:
@@ -829,9 +832,23 @@ def run_reversal(config: CreateConfig) -> str | None:
             )
             raise
 
+        # `published` must reflect what actually reached the dataset repo. A dry run makes
+        # no push and opens no PR, so recording published=True would claim work that was
+        # never done and let a later real run treat the task as fully handled. With
+        # publishing disabled there is nothing to publish, so the record is complete.
+        pr_url = publish_result.pr_url if publish_result else None
+        published = publish_result.published if publish_result else True
+
         # Save state record (non-fatal if fails)
         _save_state_record(
-            state_dir, state_file, repo_key, pipeline.repo, config.pr, task_id, task_dir
+            state_dir,
+            state_file,
+            repo_key,
+            pipeline.repo,
+            config.pr,
+            task_id,
+            task_dir,
+            published=published,
         )
 
         # Display final panels

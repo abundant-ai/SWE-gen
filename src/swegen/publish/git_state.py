@@ -114,12 +114,17 @@ class GitStateStore:
         return StreamState.from_dict(data)
 
     def load(self, repo: str) -> StreamState:
-        """Resume from the published state, folding in any fresher local mirror.
+        """Resume from the published state, merged with any local mirror.
 
-        The mirror is written before every push, so if a push failed the mirror is ahead
-        of the branch. Reading only the remote would forget those PRs - they would be
-        regenerated - and would drop publish_failed_prs, which the fetcher needs to know
-        that a PR is still awaiting its PR. Merging is a union, so neither source loses.
+        The mirror is written before every push, so after a failed push it is ahead of the
+        branch. But the branch can equally be ahead: another sandbox may have advanced it
+        while this one's .swegen sat on a persistent volume. Reading only one side would
+        forget the other's PRs and drop publish_failed_prs, which the fetcher needs to know
+        a PR is still awaiting its PR.
+
+        Sets are unioned whichever way the merge runs, so no PR is ever lost. The receiver
+        only decides per-PR value collisions (task_pr_urls, successful_prs,
+        other_failed_prs), so it must be whichever side was written more recently.
         """
         self._ensure_worktree()
 
@@ -136,21 +141,25 @@ class GitStateStore:
         if local is None:
             state = remote
         else:
-            # Merge INTO the mirror, not into the remote. The mirror is written before every
-            # push, so after a failed push it holds the newer per-PR values (a task_pr_url
-            # from a task republished under a new PR, say). merge_from lets the receiver win
-            # on collisions, so the fresher side must be the receiver.
-            before = len(local.processed_prs)
-            local.merge_from(remote)
-            state = local
+            # merge_from gives the receiver precedence, so the fresher side receives. Ties
+            # favour the mirror: it is written immediately before the push that produces the
+            # branch commit, so equal timestamps mean equal content, and preferring it keeps
+            # the failed-push recovery - the reason the mirror exists - working.
+            local_is_fresher = (local.last_updated or "") >= (remote.last_updated or "")
+            fresher, staler = (local, remote) if local_is_fresher else (remote, local)
+            source = "local mirror" if local_is_fresher else "state branch"
+
+            before = len(fresher.processed_prs)
+            fresher.merge_from(staler)
+            state = fresher
             recovered = len(state.processed_prs) - before
-            if recovered or state.publish_failed_prs:
-                self.logger.info(
-                    "Merged local mirror with the state branch: %d PRs only on the branch, "
-                    "%d pending publish failures",
-                    recovered,
-                    len(state.publish_failed_prs),
-                )
+            self.logger.info(
+                "Merged local mirror with the state branch (%s is newer): recovered %d PRs "
+                "from the other side, %d pending publish failures",
+                source,
+                recovered,
+                len(state.publish_failed_prs),
+            )
 
         self.logger.info(
             "Resumed published state for %s: %d PRs processed, %d tasks published",

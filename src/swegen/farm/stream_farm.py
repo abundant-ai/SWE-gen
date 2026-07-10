@@ -127,6 +127,12 @@ class StreamFarmer:
         # Graceful shutdown handling
         self.shutdown_requested = False
         self.aborted = False
+
+        # PRs handled this run. Distinct from state.total_processed, which counts PRs
+        # *consumed* - a dry run and a pending publish deliberately consume nothing, and
+        # driving the prune/progress cadence off a counter that never moves would fire
+        # them on every iteration.
+        self.prs_seen = 0
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
@@ -238,7 +244,7 @@ class StreamFarmer:
         # Print PR header
         merged_dt = datetime.fromisoformat(pr.merged_at.replace("Z", "+00:00"))
         self.console.print(
-            f"\n[bold cyan]═══ PR #{pr.number} ({self.state.total_processed + 1}) ═══[/bold cyan]"
+            f"\n[bold cyan]═══ PR #{pr.number} ({self.prs_seen + 1}) ═══[/bold cyan]"
         )
         self.console.print(f"[bold]{pr.title}[/bold]")
         self.console.print(
@@ -257,12 +263,19 @@ class StreamFarmer:
         )
         self.results.append(result)
 
+        self.prs_seen += 1
+
         # Mark as processed with detailed tracking
         if result.category == "publish_failed":
             # Do NOT consume the PR. The task is valid and only publishing failed, so the
             # next run must retry it rather than skip it. Publishing is idempotent: it
             # finds the stale branch, recommits, and opens the PR that never got created.
             self.state.mark_publish_failed(pr.number)
+        elif result.status == "dry-run":
+            # --dry-run generates nothing. Recording the PR would consume it AND file it
+            # under other_failed_prs as "Unknown error" (success=False, category=None),
+            # so a later real run would skip a PR that was never farmed.
+            pass
         elif result.status == "success" and self._publish_is_dry_run():
             # Also do NOT consume the PR. The task was generated and validated but nothing
             # reached the dataset repo, so a later real run must still farm this PR. The
@@ -296,13 +309,14 @@ class StreamFarmer:
         self.console.print(f"[dim]Waiting {self.config.task_delay} seconds before next PR...[/dim]")
         time.sleep(self.config.task_delay)
 
-        # Periodic summary
-        if self.state.total_processed % 10 == 0:
+        # Periodic summary. Driven by PRs seen this run, not PRs consumed: dry runs and
+        # pending publishes consume nothing, and `0 % n == 0` would fire every iteration.
+        if self.prs_seen % 10 == 0:
             self._print_progress()
 
         # Docker cleanup after batch
         if self.config.docker_prune_batch > 0:
-            if self.state.total_processed % self.config.docker_prune_batch == 0:
+            if self.prs_seen % self.config.docker_prune_batch == 0:
                 self._prune_docker()
 
     def _publish_is_dry_run(self) -> bool:
