@@ -37,11 +37,13 @@ def build_state_store(
     source_repo: str,
     local_state_file: Path,
     state_dir: Path = Path(".swegen"),
+    reset: bool = False,
 ) -> StateStore:
     """Return the state store for `source_repo`.
 
     With publishing enabled, state is committed to a branch on the dataset repo and
-    also mirrored locally for debugging.
+    also mirrored locally for debugging. `reset` signals that the durable state branch
+    should be overwritten rather than merged on the first save (see GitStateStore).
     """
     from .git_state import GitStateStore
     from .local_state import LocalStateStore
@@ -51,6 +53,7 @@ def build_state_store(
     return GitStateStore(
         publish,
         source_repo,
+        reset=reset,
         clone_dir=default_clone_dir(publish, source_repo, state_dir),
         local_mirror=local_state_file,
     )

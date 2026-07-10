@@ -79,7 +79,7 @@ class StreamFarmer:
             self.sink.preflight()
 
         self.state_store = build_state_store(
-            config.publish, repo, self.state_file, state_dir=config.state_dir
+            config.publish, repo, self.state_file, state_dir=config.state_dir, reset=config.reset
         )
 
         # Load or create state

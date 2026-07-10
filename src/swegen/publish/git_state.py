@@ -35,9 +35,14 @@ class GitStateStore:
         *,
         git: GitRepo | None = None,
         local_mirror: Path | None = None,
+        reset: bool = False,
     ) -> None:
         self.cfg = cfg
         self.source_repo = source_repo
+        # --reset: the first push must OVERWRITE the durable branch. Cleared once applied,
+        # so later saves in the same run merge normally with any legitimate concurrent
+        # writer rather than force-clobbering forever.
+        self._pending_reset = reset
         # Resolved: the linked worktree path is derived from this, and git runs with cwd
         # set to both. The default state dir is relative.
         self.clone_dir = Path(clone_dir).resolve()
@@ -200,6 +205,7 @@ class GitStateStore:
         self._commit_state(state, rel_path)
         try:
             self.git.push(refspec, cwd=self.worktree)
+            self._pending_reset = False
             return
         except Exception as e:
             # The merge recovery below only makes sense if the remote branch exists. When
@@ -207,6 +213,21 @@ class GitStateStore:
             # `fetch origin <branch>` would fail too, masking the real error.
             if not self.git.remote_branch_exists(self.branch):
                 raise
+
+            if self._pending_reset:
+                # --reset means "discard the durable state". Merging the remote back in
+                # would silently undo the reset, so overwrite the branch instead. Only the
+                # first save of a reset run forces; after that we merge normally so a
+                # legitimate concurrent writer is not clobbered on every subsequent PR.
+                self.logger.warning(
+                    "State push rejected (%s); --reset in effect, overwriting %s",
+                    e,
+                    self.branch,
+                )
+                self.git.push(refspec, cwd=self.worktree, force=True)
+                self._pending_reset = False
+                return
+
             self.logger.warning("State push rejected (%s); merging with remote and retrying", e)
 
         # The remote moved under us. Reset onto the remote tip, then MERGE the remote's

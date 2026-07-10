@@ -191,6 +191,10 @@ prune/progress cadences are driven by a per-run `prs_seen` counter rather than
 
 `--reset` with `--publish-repo` overwrites the durable state branch, not just a local file —
 every PR recorded there gets regenerated. The farm prints a warning; the behavior is intended.
+The overwrite is honored even if the first state push is rejected by a concurrent writer: a
+reset run force-pushes rather than merging, or the merge would union the old PRs back in and
+silently undo the reset. Only the first save forces; later saves in the same run merge, so a
+legitimate concurrent writer is not clobbered on every PR.
 
 `GIT_TOKEN` is separate from `GITHUB_TOKEN` (read-only, used to fetch source PRs) so a farm
 run can read from anywhere while only ever writing to one repo. It falls back to

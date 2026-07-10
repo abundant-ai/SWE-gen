@@ -166,7 +166,14 @@ class GitRepo:
         self._run(["commit", "-m", message], cwd=cwd, identity=True)
         return True
 
-    def push(self, refspec: str, *, cwd: Path | None = None, allow_force: bool = False) -> None:
+    def push(
+        self,
+        refspec: str,
+        *,
+        cwd: Path | None = None,
+        allow_force: bool = False,
+        force: bool = False,
+    ) -> None:
         """Push `refspec` to origin.
 
         Tries a normal push first, and only falls back to --force-with-lease when the
@@ -174,7 +181,20 @@ class GitRepo:
         remote and belongs to this one task, either as a leftover from an earlier attempt
         or as the branch backing its open PR, which we cut fresh and refresh. Either way
         we say so in the log.
+
+        `force` is an unconditional `git push --force`, used only to honor an explicit
+        --reset of the durable state branch: the intent is to discard whatever is on the
+        remote, so --force-with-lease (which aborts when the remote moved) is wrong here.
         """
+        if force:
+            self._run(
+                ["push", "--force", "origin", refspec],
+                cwd=cwd,
+                network=True,
+                remote_write=True,
+            )
+            return
+
         proc = self._run(
             ["push", "origin", refspec],
             cwd=cwd,
