@@ -39,7 +39,11 @@ class GitRepo:
         author_email: str = "",
         dry_run: bool = False,
     ) -> None:
-        self.path = Path(path)
+        # Absolute, always. `ensure_clone` runs `git clone <url> <path>` from the parent
+        # directory, so a relative path (the default state dir is `.swegen`) would be
+        # resolved against that cwd and the clone would land one level nested. Every other
+        # method then chdirs into a path that does not exist.
+        self.path = Path(path).resolve()
         self.token = token
         self.author_name = author_name
         self.author_email = author_email

@@ -41,7 +41,9 @@ class GitHubPRSink:
     ) -> None:
         self.cfg = cfg
         self.source_repo = source_repo
-        self.clone_dir = default_clone_dir(cfg, source_repo, state_dir)
+        # Resolved: git commands run with cwd set to this directory, and the default
+        # state dir is relative.
+        self.clone_dir = default_clone_dir(cfg, source_repo, state_dir).resolve()
         self.logger = logging.getLogger("swegen")
         self.api = GitHubAPI(cfg.token)
         self.git = git or GitRepo(

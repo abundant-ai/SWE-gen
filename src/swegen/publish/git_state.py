@@ -38,7 +38,9 @@ class GitStateStore:
     ) -> None:
         self.cfg = cfg
         self.source_repo = source_repo
-        self.clone_dir = Path(clone_dir)
+        # Resolved: the linked worktree path is derived from this, and git runs with cwd
+        # set to both. The default state dir is relative.
+        self.clone_dir = Path(clone_dir).resolve()
         self.local_mirror = local_mirror
         self.logger = logging.getLogger("swegen")
         self.git = git or GitRepo(
