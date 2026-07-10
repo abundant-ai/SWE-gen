@@ -205,6 +205,12 @@ class StreamState:
     def merge_from(self, other: StreamState) -> None:
         """Union `other` into this state, in place.
 
+        THE RECEIVER WINS on key collisions, so call this on the FRESHER of the two states
+        and pass the staler one. Sets are unioned either way, but per-PR values
+        (successful_prs, task_pr_urls, other_failed_prs) can genuinely differ - a task
+        republished after its first PR was closed has a new URL - and the newer value must
+        survive.
+
         Used when a state push is rejected because the remote moved: rather than
         hard-overwriting a cursor another writer just published, we take the union so no
         processed PR is forgotten.
@@ -229,7 +235,7 @@ class StreamState:
         self.timeout_prs |= other.timeout_prs
         self.git_error_prs |= other.git_error_prs
 
-        # Ours wins on key collision: this run has the more recent outcome.
+        # Receiver wins on key collision; callers pass the staler state as `other`.
         self.successful_prs = {**other.successful_prs, **self.successful_prs}
         self.task_pr_urls = {**other.task_pr_urls, **self.task_pr_urls}
         self.other_failed_prs = {**other.other_failed_prs, **self.other_failed_prs}

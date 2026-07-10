@@ -105,23 +105,30 @@ class GitStateStore:
         """
         self._ensure_worktree()
 
-        state = self._read_state_file(repo)
+        remote = self._read_state_file(repo)
         local = self._read_local_mirror(repo)
 
-        if state is None:
+        if remote is None:
             if local is None:
                 self.logger.info("No usable published state for %s; starting fresh", repo)
                 return StreamState(repo=repo)
             self.logger.info("No published state for %s; resuming from local mirror", repo)
             return local
 
-        if local is not None:
-            before = len(state.processed_prs)
-            state.merge_from(local)
+        if local is None:
+            state = remote
+        else:
+            # Merge INTO the mirror, not into the remote. The mirror is written before every
+            # push, so after a failed push it holds the newer per-PR values (a task_pr_url
+            # from a task republished under a new PR, say). merge_from lets the receiver win
+            # on collisions, so the fresher side must be the receiver.
+            before = len(local.processed_prs)
+            local.merge_from(remote)
+            state = local
             recovered = len(state.processed_prs) - before
-            if recovered or local.publish_failed_prs:
+            if recovered or state.publish_failed_prs:
                 self.logger.info(
-                    "Local mirror was ahead of the state branch: recovered %d processed PRs, "
+                    "Merged local mirror with the state branch: %d PRs only on the branch, "
                     "%d pending publish failures",
                     recovered,
                     len(state.publish_failed_prs),
