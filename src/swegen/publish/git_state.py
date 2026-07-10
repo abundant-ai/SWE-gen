@@ -240,6 +240,13 @@ class GitStateStore:
         remote_state = self._read_state_file(state.repo)
         if remote_state is not None:
             state.merge_from(remote_state)
+            # merge_from mutated the in-memory state; refresh the mirror so it reflects what
+            # we are about to push. save() wrote the mirror once before the merge, and the
+            # recovery guidance points operators at it - a stale pre-merge mirror would
+            # disagree with the branch. (load() unions the two anyway, so this is
+            # consistency, not data safety.)
+            if self.local_mirror is not None:
+                state.save(self.local_mirror)
 
         self._commit_state(state, rel_path)
         self.git.push(refspec, cwd=self.worktree)
