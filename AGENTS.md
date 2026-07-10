@@ -156,6 +156,12 @@ not proof it reached the dataset repo — it may predate publishing, or belong t
 push failed. Returning silently would let the farm mark the source PR processed with no PR
 ever opened. Publishing is idempotent, so a task already published just yields its PR URL.
 
+An **already-open PR refreshes its branch**; it short-circuits only PR *creation*. The task
+may have been regenerated (`--force`, `--reset`, a rerun after a failed `create.jsonl` write),
+and returning early would leave the branch and PR on older content while the pipeline reported
+success. If the task is already merged into the base branch byte-for-byte there is nothing to
+commit, and publish reports success without pushing.
+
 `GitStateStore.load` merges the **local mirror** into the state branch. The mirror is written
 before every push, so a failed push leaves it ahead of the branch; reading only the remote
 would forget those PRs and drop `publish_failed_prs`, which the fetcher needs to know a PR

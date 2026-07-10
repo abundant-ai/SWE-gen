@@ -86,6 +86,13 @@ class GitHubPRSink:
     # -- publish -------------------------------------------------------------
 
     def publish(self, ctx: PublishContext) -> PublishResult:
+        """Publish `ctx` to its own branch, opening a PR if one is not already open.
+
+        An existing open PR short-circuits only PR *creation*, never the branch update.
+        The caller may have regenerated the task (--force, --reset, a rerun after a failed
+        create.jsonl write), and returning early would leave the branch and PR on older
+        content while the pipeline reported success.
+        """
         self.preflight()
 
         branch = self.branch_for(ctx.task_id)
@@ -94,9 +101,10 @@ class GitHubPRSink:
         existing = None if self.cfg.dry_run else self.api.find_open_pr(self.cfg.repo, branch)
         if existing:
             self.logger.info(
-                "Task %s already has an open PR: %s", ctx.task_id, existing["html_url"]
+                "Task %s already has an open PR (%s); refreshing its branch",
+                ctx.task_id,
+                existing["html_url"],
             )
-            return PublishResult(published=True, pr_url=existing["html_url"], branch=branch)
 
         stale_branch = self.git.remote_branch_exists(branch)
 
@@ -112,12 +120,21 @@ class GitHubPRSink:
         rel_path = f"{self.cfg.tasks_path}/{ctx.task_id}"
         self.git.add(rel_path)
         if not self.git.commit(render_commit_message(ctx)):
-            raise PublishError(
-                f"Nothing to commit for {ctx.task_id}; task directory {ctx.task_dir} may be empty."
+            # The branch is cut from the base, so an empty diff means the task is already
+            # merged there byte-for-byte. Nothing to push, and no PR to open.
+            if not any(dest.iterdir()):
+                raise PublishError(f"Task directory {ctx.task_dir} is empty; nothing to publish.")
+            self.logger.info(
+                "Task %s is already present in %s; nothing to publish",
+                ctx.task_id,
+                self.cfg.base_branch,
             )
+            pr_url = existing["html_url"] if existing else None
+            return PublishResult(published=True, pr_url=pr_url, branch=branch)
 
-        # A stale branch is one this same task left behind on an earlier attempt, so
-        # overwriting it is safe. A fresh branch must never need force.
+        # A stale branch belongs to this same task from an earlier attempt (or backs the
+        # open PR we are refreshing), so overwriting it is safe. A fresh branch never
+        # needs force.
         self.git.push(f"{branch}:refs/heads/{branch}", allow_force=stale_branch)
 
         if self.cfg.dry_run:
@@ -129,6 +146,10 @@ class GitHubPRSink:
                 self.cfg.base_branch,
             )
             return PublishResult(published=False, pr_url=None, branch=branch)
+
+        if existing:
+            # Branch refreshed above; the open PR now carries the regenerated task.
+            return PublishResult(published=True, pr_url=existing["html_url"], branch=branch)
 
         pr = self.api.create_pr(
             repo=self.cfg.repo,

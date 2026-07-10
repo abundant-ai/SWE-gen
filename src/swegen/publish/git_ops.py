@@ -183,8 +183,9 @@ class GitRepo:
             raise GitError(f"git push origin {refspec} failed: {proc.stderr.strip()}")
 
         self.logger.warning(
-            "Normal push of %s was rejected (%s). Branch is a stale leftover from an "
-            "earlier attempt at this task; retrying with --force-with-lease.",
+            "Normal push of %s was rejected (%s). The branch belongs to this task alone - "
+            "a leftover from an earlier attempt, or the branch backing its open PR - so "
+            "retrying with --force-with-lease.",
             refspec,
             proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "no stderr",
         )
