@@ -116,7 +116,9 @@ that rule — without `--force` the publish would fail on `git add` with "paths 
 Only the one `tasks/<task_id>/` pathspec is ever staged.
 
 **Publish failures stop the run.** A bad token fails at preflight, before any PR is
-processed. Once farming is underway, a fatal failure (token rejected, GitHub down, retries
+processed. Preflight rejects only an *explicit* `push: false` from `GET /repos`; fine-grained
+and app tokens may omit `permissions` entirely, so an absent field warns and proceeds rather
+than blocking a token whose pushes would have succeeded. Once farming is underway, a fatal failure (token rejected, GitHub down, retries
 exhausted against a 5xx or rate limit) aborts immediately — the next PR would spend a full
 Claude Code session only to hit the same wall. An ambiguous failure (a rejected `git push`
 looks identical whether the remote is broken or the task is) is tolerated once and aborts on

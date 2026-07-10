@@ -63,20 +63,35 @@ class GitHubPRSink:
         return f"{self.cfg.branch_prefix}{task_id}"
 
     def preflight(self) -> None:
-        """Verify write access and prepare the clone, before any task is generated.
+        """Verify the dataset repo is reachable and writable, before any task is generated.
 
-        Called once at farm startup so a bad token fails in seconds rather than after
-        the first hour-long Claude Code session.
+        Called once at farm startup so a bad token fails in seconds rather than after the
+        first hour-long Claude Code session.
+
+        Only an EXPLICIT `push: false` is treated as a rejection. Some tokens - notably
+        fine-grained PATs and app installation tokens - omit or under-report `permissions`
+        on GET /repos, and refusing those would block a token whose pushes and PRs would
+        have succeeded. When the field is absent we warn and let the first push decide:
+        a publish failure aborts the run and preserves the task, so the cost of being
+        wrong is one Claude Code session, not a lost task.
         """
         if self._preflight_done:
             return
 
         repo_data = self.api.get_repo(self.cfg.repo)
-        permissions = repo_data.get("permissions") or {}
-        if not permissions.get("push"):
-            raise PublishAuthError(
-                f"Token lacks write access to {self.cfg.repo}. Needs a fine-grained PAT "
-                f"with contents:write and pull_requests:write (or classic 'repo' scope)."
+        permissions = repo_data.get("permissions")
+
+        if isinstance(permissions, dict) and "push" in permissions:
+            if not permissions["push"]:
+                raise PublishAuthError(
+                    f"Token lacks write access to {self.cfg.repo}. Needs a fine-grained PAT "
+                    f"with contents:write and pull_requests:write (or classic 'repo' scope)."
+                )
+        else:
+            self.logger.warning(
+                "GitHub did not report push permission for %s (common for fine-grained and "
+                "app tokens). Proceeding; a write failure will surface on the first publish.",
+                self.cfg.repo,
             )
 
         self.git.ensure_clone(self.clone_url)
