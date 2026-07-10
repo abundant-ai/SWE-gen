@@ -115,23 +115,28 @@ Tasks are staged with `git add --force`. SWE-gen's own `.gitignore` excludes `ta
 that rule — without `--force` the publish would fail on `git add` with "paths are ignored".
 Only the one `tasks/<task_id>/` pathspec is ever staged.
 
-**Publish failures stop the run.** A bad token fails at preflight, before any PR is
-processed. Preflight rejects only an *explicit* `push: false` from `GET /repos`; fine-grained
-and app tokens may omit `permissions` entirely, so an absent field warns and proceeds rather
-than blocking a token whose pushes would have succeeded. Once farming is underway, a fatal failure (token rejected, GitHub down, retries
-exhausted against a 5xx or rate limit) aborts immediately — the next PR would spend a full
-Claude Code session only to hit the same wall. An ambiguous failure (a rejected `git push`
-looks identical whether the remote is broken or the task is) is tolerated once and aborts on
-the second in a row. Non-publish failures never abort.
+**Publish failures stop the run — on the first one.** A bad token fails at preflight, before
+any PR is processed. Preflight rejects only an *explicit* `push: false` from `GET /repos`;
+fine-grained and app tokens may omit `permissions` entirely, so an absent field warns and
+proceeds rather than blocking a token whose pushes would have succeeded.
+
+Once farming is underway, any publish failure aborts: a rejected `git push` cannot be told
+apart from a broken remote, and the next PR would spend a full Claude Code session only to
+hit the same wall. A failed **state push** aborts for the same reason, including the final
+push in `_finalize()` (which sets a nonzero exit code). Both are checked together, so an
+abort that happens to hit both reports both — the panel never claims farm state was preserved
+when it was not. Non-publish failures (trivial, no-issue, validation) never abort.
 
 Tasks that fail to publish are **kept on disk** (unlike other failures, which are cleaned
 up): they passed every validation gate, so they are valid work that can be pushed by hand or
-by a re-run. Farm state is preserved, so a re-run does not regenerate already-processed PRs.
+by a re-run.
 
 The source PR is **not marked processed** on a publish failure, so a re-run retries it. This
 is the recovery path for a push that succeeds and a `create_pr` that then fails: the retry
-finds the stale branch, recommits, and opens the PR that never got created. Marking it
-processed would strand a branch on the remote with no PR and no way to reach it again.
+refreshes the branch this task left behind and opens the PR that never got created. Marking
+it processed would strand a branch on the remote with no PR and no way to reach it again.
+`StreamingPRFetcher` also exempts these PRs from the resume-time skip, so one sharing the
+cursor's timestamp is retried rather than stranded.
 
 That retry is **publish-only**: the farm republishes the task already on disk rather than
 regenerating it. Regeneration runs with `force=True`, which `rmtree`s the task directory
@@ -139,10 +144,8 @@ before rebuilding — throwing away a validated task to redo an hour of Claude C
 it outright if the rebuild then fails. If the task is missing (a fresh sandbox), the retry
 falls back to full generation.
 
-A failed **state push** is equally fatal and also stops the run, including the final push in
-`_finalize()` (which sets a nonzero exit code). If the state branch stops advancing, a
-resumed sandbox works from a stale cursor and repeats hours of Claude Code on PRs it already
-handled. The local mirror is still written, so nothing is lost from disk.
+When a state push fails, the local mirror has already been written, so nothing is lost from
+disk — but the durable cursor is behind, and the abort panel says so and names the mirror.
 
 If a state push is rejected because the remote moved, the loser **merges** rather than
 overwrites: `StreamState.merge_from` unions the processed-PR sets and keeps the newer cursor
@@ -155,9 +158,12 @@ on every mutation, never incremented in place. A PR can move between categories 
 failure that later succeeds on retry — and a merge unions two states; incremental counting
 drifts in both cases.
 
-`swegen create` publishes **before** writing its `create.jsonl` dedupe record. Recording a
-task that was never published would make the next run skip it as a duplicate, with no way to
-retry the publish short of `--force`.
+`swegen create` publishes **before** writing its `create.jsonl` dedupe record, and the record
+carries a `published` flag reflecting what actually reached the dataset repo — `false` under
+`--publish-dry-run`, and `false` when the publish raised, in which case the task is *still*
+recorded so a rerun's dedupe finds it and republishes rather than hitting `FileExistsError`
+and needing `--force`, which would delete it. Records written before this flag existed are
+read as published.
 
 A **dedupe hit publishes the existing task** rather than returning early. A task on disk is
 not proof it reached the dataset repo — it may predate publishing, or belong to a run whose
@@ -170,10 +176,18 @@ and returning early would leave the branch and PR on older content while the pip
 success. If the task is already merged into the base branch byte-for-byte there is nothing to
 commit, and publish reports success without pushing.
 
-`GitStateStore.load` merges the **local mirror** into the state branch. The mirror is written
-before every push, so a failed push leaves it ahead of the branch; reading only the remote
-would forget those PRs and drop `publish_failed_prs`, which the fetcher needs to know a PR
-still awaits its PR.
+`GitStateStore.load` merges the **local mirror** with the state branch, and the side with the
+newer `last_updated` is the merge receiver (ties favour the mirror). A failed push leaves the
+mirror ahead of the branch; another sandbox can equally leave the branch ahead of a mirror
+sitting on a persistent volume. Reading only one side would forget the other's PRs and drop
+`publish_failed_prs`, which the fetcher needs to know a PR still awaits its PR. Sets union
+whichever way the merge runs, so no PR is ever lost — the receiver only decides per-PR value
+collisions (`task_pr_urls`, `successful_prs`, `other_failed_prs`).
+
+**Dry runs record nothing.** `--dry-run` generates no task, and `--publish-dry-run` pushes
+nothing, so neither consumes a source PR — a later real run must still farm it. The
+prune/progress cadences are driven by a per-run `prs_seen` counter rather than
+`state.total_processed`, which a dry run leaves at zero.
 
 `--reset` with `--publish-repo` overwrites the durable state branch, not just a local file —
 every PR recorded there gets regenerated. The farm prints a warning; the behavior is intended.
@@ -506,9 +520,8 @@ Common error types:
 - **ValidationError** - Harbor NOP/Oracle validation failed
 - **FileExistsError** - Task already exists (use `--force`)
 
-- **PublishError** - Task-specific publish rejection; farming continues
-- **PublishFatalError** - Publishing is broken for every task (GitHub down, retries exhausted); farming stops
-- **PublishAuthError** - Publish token missing, invalid, or lacking write access (subclass of PublishFatalError)
+- **PublishError** - A task could not be published (push/PR failed, or a recorded task is missing from disk); farming stops
+- **PublishAuthError** - Publish token missing, invalid, or lacking write access; raised at preflight, never retried (subclass of PublishError)
 
 Farm mode classifies failures for reporting:
 - Trivial PR (skipped)

@@ -268,8 +268,9 @@ class StreamFarmer:
         # Mark as processed with detailed tracking
         if result.category == "publish_failed":
             # Do NOT consume the PR. The task is valid and only publishing failed, so the
-            # next run must retry it rather than skip it. Publishing is idempotent: it
-            # finds the stale branch, recommits, and opens the PR that never got created.
+            # next run must retry it rather than skip it. That retry is publish-only (see
+            # publish_only above): publishing is idempotent, so it finds the branch this
+            # task left behind, refreshes it, and opens the PR that never got created.
             self.state.mark_publish_failed(pr.number)
         elif result.status == "dry-run":
             # --dry-run generates nothing. Recording the PR would consume it AND file it

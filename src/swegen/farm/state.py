@@ -213,12 +213,16 @@ class StreamState:
 
         Deliberately does not add to processed_prs or advance last_created_at: the task
         was generated and validated, and only the push/PR failed. Leaving the PR
-        unprocessed means the next run retries it, and the publish path is idempotent -
-        it finds the stale branch, recommits, and opens the PR that never got created.
+        unprocessed means the next run retries it - publish-only, reusing the task already
+        on disk rather than regenerating it - and the publish path is idempotent, so it
+        refreshes the branch this task left behind and opens the PR that never got created.
 
         This is the recovery path for a push that succeeds and a create_pr that then
         fails, which would otherwise strand a branch on the remote with no PR and no way
         for the farm to reach it again.
+
+        StreamingPRFetcher exempts these PRs from the resume-time skip, so a PR sharing the
+        cursor's timestamp is still retried rather than stranded.
         """
         self._clear_outcome(pr_number)
         self.publish_failed_prs.add(pr_number)
@@ -229,14 +233,15 @@ class StreamState:
         """Union `other` into this state, in place.
 
         THE RECEIVER WINS on key collisions, so call this on the FRESHER of the two states
-        and pass the staler one. Sets are unioned either way, but per-PR values
-        (successful_prs, task_pr_urls, other_failed_prs) can genuinely differ - a task
-        republished after its first PR was closed has a new URL - and the newer value must
-        survive.
+        and pass the staler one. Sets are unioned either way - no PR is ever lost whichever
+        way round it runs - but per-PR values (successful_prs, task_pr_urls,
+        other_failed_prs) can genuinely differ, and a PR judged a failure by one side and a
+        success by the other must end up with exactly one verdict.
 
-        Used when a state push is rejected because the remote moved: rather than
-        hard-overwriting a cursor another writer just published, we take the union so no
-        processed PR is forgotten.
+        Two callers, both of which must pick the fresher receiver:
+          * GitStateStore._write_and_push, when a push is rejected because the remote moved
+            - rather than hard-overwriting a cursor another writer just published
+          * GitStateStore.load, folding the local mirror and the state branch together
 
         last_created_at takes the NEWER of the two. The stream is created-descending and
         skips PRs created at or after the cursor, so a newer cursor skips less. Anything

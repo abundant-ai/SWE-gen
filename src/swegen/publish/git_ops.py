@@ -165,9 +165,11 @@ class GitRepo:
     def push(self, refspec: str, *, cwd: Path | None = None, allow_force: bool = False) -> None:
         """Push `refspec` to origin.
 
-        Tries a normal push first. Only if that is rejected - which for our branch
-        naming means a stale branch left by an earlier run of this same task - do we
-        fall back to --force-with-lease, and we say so.
+        Tries a normal push first, and only falls back to --force-with-lease when the
+        caller passes allow_force - true exactly when the branch already exists on the
+        remote and belongs to this one task, either as a leftover from an earlier attempt
+        or as the branch backing its open PR, which we cut fresh and refresh. Either way
+        we say so in the log.
         """
         proc = self._run(
             ["push", "origin", refspec],

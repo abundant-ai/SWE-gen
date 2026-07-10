@@ -120,7 +120,7 @@ def _check_dedupe(
             Panel(
                 body,
                 title=f"Duplicate key: [bold]{repo_key}[/bold]",
-                subtitle="Use --force to regenerate",
+                subtitle="Reusing the existing task; --force to regenerate",
                 border_style="yellow",
             )
         )
@@ -359,8 +359,9 @@ def _publish_task(
     that failed validation. Raises PublishError on failure - an unpublished task is
     lost when an ephemeral sandbox dies, so it is not a success.
 
-    Must run BEFORE the dedupe record is written: a task recorded in create.jsonl but
-    never published cannot be retried without --force.
+    Runs BEFORE the dedupe record is written, so a task that never reached the dataset
+    repo is not recorded as fully published. The caller still records it on failure,
+    flagged published=False, so a rerun republishes it instead of needing --force.
 
     Returns the full PublishResult (callers need `published`, not just the URL: a dry run
     and an already-merged task both yield no URL but mean different things), or None when
@@ -523,8 +524,12 @@ def run_reversal(config: CreateConfig) -> str | None:
         config: Typed configuration with repo, PR number, and options.
 
     Returns:
-        URL of the pull request the task was published to, or None if publishing is
-        disabled (no config.publish), running dry, or the task was skipped by dedupe.
+        URL of the pull request the task was published to, or None when publishing is
+        disabled (no config.publish), when --publish-dry-run suppressed the push, or when
+        the task was already merged into the base branch and needed no PR.
+
+        A dedupe hit does not return early: the recorded task is republished (it may never
+        have reached the dataset repo), or - if its directory is gone - regenerated.
     """
     rich_traceback_install(show_locals=False)
     console = Console()

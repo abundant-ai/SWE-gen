@@ -6,12 +6,16 @@ from typing import Protocol
 
 
 class PublishError(RuntimeError):
-    """A task was generated and validated but could not be published.
+    """A task could not be published.
+
+    Usually the task was generated and validated and only the push or PR creation failed;
+    it is also raised when a task recorded in state is missing from disk.
 
     Always ends the farm run. Continuing would spend a full Claude Code session on the
     next PR only to fail at the same wall, and a task that exists solely on an ephemeral
-    sandbox is one reclaim away from being lost. The task directory is preserved so an
-    operator can recover it by hand.
+    sandbox is one reclaim away from being lost. Where the task directory exists it is
+    preserved - never cleaned up - so an operator can publish it by hand, and a re-run
+    retries the publish without regenerating it.
     """
 
 
