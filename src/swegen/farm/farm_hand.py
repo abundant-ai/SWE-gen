@@ -14,6 +14,7 @@ from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
 from swegen.create.claude_code_runner import ClaudeRateLimitError
 from swegen.create.create import publish_existing_task, run_reversal
+from swegen.create.task_reference import TaskReferenceStore
 from swegen.publish import PublishError
 
 
@@ -24,9 +25,10 @@ def _now_utc() -> datetime:
 def _publish_for_generation(config: FarmConfig):
     """Publish config for a farm-driven run_reversal, with local cleanup suppressed.
 
-    The farm cleans up itself, AFTER saving a task reference and passing its success gate.
-    Letting run_reversal delete the task dir first would break the gate (missing dir reads
-    as a pipeline failure) and leave the task reference pointing at a deleted directory.
+    The farm cleans up itself, after its success gate passes. Letting run_reversal delete
+    the task dir first would break that gate (a missing dir reads as a pipeline failure).
+    run_reversal still saves the task reference (before publish); the farm's own cleanup
+    clears that reference when it deletes the task, so nothing dangles.
     """
     if config.publish is None:
         return None
@@ -50,6 +52,12 @@ def _cleanup_local_if_published(
             console.print(f"[dim]Removed local task copy {task_dir} (published)[/dim]")
     except OSError as e:
         console.print(f"[yellow]Could not remove local task copy {task_dir}: {e}[/yellow]")
+
+    # run_reversal saved a task reference before publishing (it does not see the farm's
+    # cleanup intent, since the generation config suppresses cleanup_local). Drop it now,
+    # or it would point Claude Code at the directory we just deleted.
+    reference_file = Path(config.state_dir) / "task_references.json"
+    TaskReferenceStore(reference_file=reference_file).clear(config.repo, task_id)
 
 
 def _slug(repo: str) -> str:

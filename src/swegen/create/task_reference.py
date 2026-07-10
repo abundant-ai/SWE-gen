@@ -87,6 +87,22 @@ class TaskReferenceStore:
             logger.warning(f"Failed to save task reference: {e}")
             return False
 
+    def clear(self, repo: str, task_id: str) -> None:
+        """Drop the reference for `repo` if it points at `task_id`.
+
+        Used when a task directory is deleted (e.g. --cleanup-local): a reference points
+        Claude Code at that directory, so a reference to a removed task would dangle.
+        Non-fatal: a stale reference only degrades to from-scratch generation.
+        """
+        try:
+            references = self._load_references()
+            existing = references.get(repo)
+            if existing is not None and existing.task_id == task_id:
+                del references[repo]
+                self._save_references(references)
+        except Exception as e:
+            logger.warning(f"Failed to clear task reference for {repo}: {e}")
+
     def get(
         self,
         repo: str,
