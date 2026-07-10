@@ -287,13 +287,17 @@ class StreamState:
     def from_dict(cls, data: dict) -> StreamState:
         """Load state from a dict.
 
+        Counters are re-derived from the detailed sets rather than trusted as stored, so a
+        state file written before counters became derived - or hand-edited - cannot make
+        the summary panels report totals that contradict the recorded PRs.
+
         Args:
             data: Dict previously created by to_dict()
 
         Returns:
             StreamState instance
         """
-        return cls(
+        state = cls(
             repo=data["repo"],
             processed_prs=set(data.get("processed_prs", [])),
             total_fetched=data.get("total_fetched", 0),
@@ -318,6 +322,8 @@ class StreamState:
             git_error_prs=set(data.get("git_error_prs", [])),
             other_failed_prs={int(k): v for k, v in data.get("other_failed_prs", {}).items()},
         )
+        state._recompute_counters()
+        return state
 
     def save(self, state_file: Path) -> None:
         """Save state to a JSON file.
