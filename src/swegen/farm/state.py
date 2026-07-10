@@ -211,8 +211,8 @@ class StreamState:
     def mark_publish_failed(self, pr_number: int) -> None:
         """Record a publish failure WITHOUT consuming the PR.
 
-        Deliberately does not add to processed_prs or advance last_created_at: the task
-        was generated and validated, and only the push/PR failed. Leaving the PR
+        Removes the PR from processed_prs (if present) and does not advance last_created_at:
+        the task was generated and validated, and only the push/PR failed. Leaving the PR
         unprocessed means the next run retries it - publish-only, reusing the task already
         on disk rather than regenerating it - and the publish path is idempotent, so it
         refreshes the branch this task left behind and opens the PR that never got created.
@@ -225,6 +225,10 @@ class StreamState:
         cursor's timestamp is still retried rather than stranded.
         """
         self._clear_outcome(pr_number)
+        # A pending publish is by definition not "done". If the PR was previously recorded
+        # as processed, remove it: the fetcher skips processed_prs BEFORE the publish_failed
+        # exemption, so leaving it in both would make the PR skipped and never retried.
+        self.processed_prs.discard(pr_number)
         self.publish_failed_prs.add(pr_number)
         self.last_updated = datetime.now(UTC).isoformat()
         self._recompute_counters()
@@ -364,6 +368,11 @@ class StreamState:
             git_error_prs=set(data.get("git_error_prs", [])),
             other_failed_prs={int(k): v for k, v in data.get("other_failed_prs", {}).items()},
         )
+        # Enforce the invariant on load, not just via merge_from/mark_publish_failed. A PR
+        # pending publication must not also be in processed_prs, or the fetcher skips it as
+        # already-processed (that check runs before the publish_failed exemption) and never
+        # retries. Guards against legacy state files and hand edits.
+        state.processed_prs -= state.publish_failed_prs
         state._recompute_counters()
         return state
 
