@@ -129,20 +129,36 @@ class GitHubPRSink:
         self.git.checkout_fresh_branch(branch, f"origin/{self.cfg.base_branch}")
 
         dest = self.clone_dir / self.cfg.tasks_path / ctx.task_id
-        if dest.exists():
-            shutil.rmtree(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(ctx.task_dir, dest)
+        # Filesystem errors here (disk full, permissions) must surface as PublishError, not
+        # a bare OSError. A bare OSError reads to the farm as a generic pipeline failure,
+        # which cleans up (deletes) the validated task - but this is a publish failure, and
+        # the task must be kept on disk for a re-run. git ops already raise GitError
+        # (a PublishError); only these copies were unguarded.
+        try:
+            if dest.exists():
+                shutil.rmtree(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(ctx.task_dir, dest)
+        except OSError as e:
+            raise PublishError(
+                f"Could not stage task {ctx.task_id} into the clone ({dest}): {e}"
+            ) from e
 
         rel_path = f"{self.cfg.tasks_path}/{ctx.task_id}"
         self.git.add(rel_path)
         if not self.git.commit(render_commit_message(ctx)):
             # The branch is cut from the base, so an empty diff means the task is already
-            # merged there byte-for-byte. Nothing to push, and no PR to open.
+            # merged there byte-for-byte. There is no new commit to push.
             if not any(dest.iterdir()):
                 raise PublishError(f"Task directory {ctx.task_dir} is empty; nothing to publish.")
+            # A stale remote branch (and any open PR on it) can still point at an older
+            # commit. Our branch now equals base, so force it up: the branch reflects that
+            # the task is in base, rather than leaving the PR showing outdated content while
+            # we report published=True.
+            if stale_branch:
+                self.git.push(f"{branch}:refs/heads/{branch}", allow_force=True)
             self.logger.info(
-                "Task %s is already present in %s; nothing to publish",
+                "Task %s is already present in %s; branch synced, nothing new to publish",
                 ctx.task_id,
                 self.cfg.base_branch,
             )
