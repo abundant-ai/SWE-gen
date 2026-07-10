@@ -186,7 +186,8 @@ def _retry_publish_only(
         publish=config.publish,
     )
     record = {"task_id": task_id, "harbor": str(harbor_dir)}
-    pr_url = publish_existing_task(console, create_config, config.repo, pr.number, record)
+    result = publish_existing_task(console, create_config, config.repo, pr.number, record)
+    pr_url = result.pr_url if result else None
 
     _print_success(console, pr, task_id, harbor_dir, pr_url)
     return TaskResult(

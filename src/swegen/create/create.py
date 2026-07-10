@@ -311,7 +311,7 @@ def publish_existing_task(
     repo: str,
     pr: int,
     record: dict,
-) -> str | None:
+) -> PublishResult | None:
     """Publish a task that already exists on disk, without regenerating it.
 
     Used for two recoveries:
@@ -319,9 +319,10 @@ def publish_existing_task(
       * a publish-only retry after a failed push, where regenerating would destroy the
         validated task the farm deliberately preserved
 
-    Returning silently would let the farm mark the source PR processed with no PR ever
-    opened. Publishing is idempotent, so re-publishing an already-published task returns
-    its existing PR URL.
+    Returns the full PublishResult, not just the URL: a successful republish of a task
+    already merged into the base branch has published=True but no URL, and the caller must
+    key "did this reach the dataset repo?" on `published`, not on the URL. None only when
+    publishing is disabled.
     """
     if config.publish is None:
         return None
@@ -339,8 +340,7 @@ def publish_existing_task(
 
     console.print(f"[cyan]Task already generated; publishing {task_id} from {task_dir}[/cyan]")
     sink = _preflight_publish(console, config, repo)
-    result = _publish_task(console, config, sink, repo, pr, task_id, task_dir, metadata={})
-    return result.pr_url if result else None
+    return _publish_task(console, config, sink, repo, pr, task_id, task_dir, metadata={})
 
 
 def _publish_task(
@@ -567,11 +567,15 @@ def run_reversal(config: CreateConfig) -> str | None:
                 # whose push failed records published=False). Publish it rather than
                 # returning as if the work were done, and never regenerate - that would
                 # delete a valid task.
-                pr_url = publish_existing_task(
+                result = publish_existing_task(
                     console, config, pipeline.repo, config.pr, duplicate
                 )
-                if pr_url and not duplicate.get("published", True):
-                    # Recovered: supersede the unpublished record so later runs see it done.
+                # Supersede the unpublished record once the republish actually reaches the
+                # dataset repo. Key on `published`, not the URL: a task already merged into
+                # the base branch republishes with published=True and no URL, and keying on
+                # the URL would leave published=False forever and republish on every run.
+                published = result.published if result else False
+                if published and not duplicate.get("published", True):
                     _save_state_record(
                         state_dir,
                         state_file,
@@ -582,7 +586,7 @@ def run_reversal(config: CreateConfig) -> str | None:
                         duplicate_dir,
                         published=True,
                     )
-                return pr_url
+                return result.pr_url if result else None
 
         # Verify the dataset repo is writable before spending a Claude Code session on a
         # task we would then be unable to publish.
