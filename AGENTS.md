@@ -134,6 +134,9 @@ that `claude-agent-sdk` fails to parse — are raised as `ClaudeRateLimitError` 
 swallowed into a validation failure. Every task draws from the same limit, so continuing is
 pointless until the token/account is swapped; the run stops and the source PR is left
 unprocessed so a re-run with a fresh token farms it. The abort panel says to swap the token.
+The PR is recorded in `claude_rate_limited_prs` (not merely skipped) and exempted from the
+resume-time skip, exactly like `publish_failed_prs` — otherwise a PR sharing the resume
+cursor's exact `created_at` would be dropped by the fetcher's `>=` and never retried.
 
 Tasks that fail to publish are **kept on disk** (unlike other failures, which are cleaned
 up): they passed every validation gate, so they are valid work that can be pushed by hand or

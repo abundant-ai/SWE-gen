@@ -56,6 +56,10 @@ class StreamState:
     successful_prs: dict[int, str] = None  # PR# -> task_id
     task_pr_urls: dict[int, str] = None  # PR# -> URL of the published task PR
     publish_failed_prs: set[int] = None
+    # Claude rate/usage limit aborted the run on this PR. Distinct from rate_limit_prs
+    # (GitHub API limit, a consumed skip). Not consumed: exempted from the resume-time
+    # skip so a re-run with a fresh token retries it, like publish_failed_prs.
+    claude_rate_limited_prs: set[int] = None
     trivial_prs: set[int] = None
     no_issue_prs: set[int] = None
     no_tests_prs: set[int] = None
@@ -78,6 +82,8 @@ class StreamState:
             self.task_pr_urls = {}
         if self.publish_failed_prs is None:
             self.publish_failed_prs = set()
+        if self.claude_rate_limited_prs is None:
+            self.claude_rate_limited_prs = set()
         if self.trivial_prs is None:
             self.trivial_prs = set()
         if self.no_issue_prs is None:
@@ -112,6 +118,7 @@ class StreamState:
         "timeout_prs",
         "git_error_prs",
         "publish_failed_prs",
+        "claude_rate_limited_prs",
     )
 
     def _clear_outcome(self, pr_number: int, *, keep_success: bool = False) -> None:
@@ -233,6 +240,21 @@ class StreamState:
         self.last_updated = datetime.now(UTC).isoformat()
         self._recompute_counters()
 
+    def mark_claude_rate_limited(self, pr_number: int) -> None:
+        """Record that Claude's rate/usage limit aborted the run on this PR, without
+        consuming it.
+
+        Like mark_publish_failed: nothing was durably done, so the PR must not be counted
+        as processed, and the fetcher exempts claude_rate_limited_prs from the resume-time
+        skip so a re-run with a fresh token retries it even on a timestamp tie with the
+        cursor. A later successful run clears it via mark_processed -> _clear_outcome.
+        """
+        self._clear_outcome(pr_number)
+        self.processed_prs.discard(pr_number)
+        self.claude_rate_limited_prs.add(pr_number)
+        self.last_updated = datetime.now(UTC).isoformat()
+        self._recompute_counters()
+
     def merge_from(self, other: StreamState) -> None:
         """Union `other` into this state, in place.
 
@@ -285,11 +307,13 @@ class StreamState:
                 getattr(self, name).discard(pr_number)
             self.other_failed_prs.pop(pr_number, None)
 
-        # A PR still pending publication must stay UNCONSUMED, even though the staler side
-        # recorded it as processed. Subtracting the other way would let `other.processed_prs`
-        # swallow our pending retry and the PR would never be farmed again.
+        # A PR still pending (publish failed, or Claude rate-limited) must stay UNCONSUMED,
+        # even though the staler side recorded it as processed. Subtracting the other way
+        # would let `other.processed_prs` swallow our pending retry and the PR would never
+        # be farmed again.
         self.publish_failed_prs -= set(self.successful_prs)
-        self.processed_prs -= self.publish_failed_prs
+        self.claude_rate_limited_prs -= set(self.successful_prs)
+        self.processed_prs -= self.publish_failed_prs | self.claude_rate_limited_prs
 
         self.total_fetched = max(self.total_fetched, other.total_fetched)
         if other.last_created_at and (
@@ -317,6 +341,7 @@ class StreamState:
             "successful_prs": {str(k): v for k, v in self.successful_prs.items()},
             "task_pr_urls": {str(k): v for k, v in self.task_pr_urls.items()},
             "publish_failed_prs": list(self.publish_failed_prs),
+            "claude_rate_limited_prs": list(self.claude_rate_limited_prs),
             "trivial_prs": list(self.trivial_prs),
             "no_issue_prs": list(self.no_issue_prs),
             "no_tests_prs": list(self.no_tests_prs),
@@ -357,6 +382,7 @@ class StreamState:
             successful_prs={int(k): v for k, v in data.get("successful_prs", {}).items()},
             task_pr_urls={int(k): v for k, v in data.get("task_pr_urls", {}).items()},
             publish_failed_prs=set(data.get("publish_failed_prs", [])),
+            claude_rate_limited_prs=set(data.get("claude_rate_limited_prs", [])),
             trivial_prs=set(data.get("trivial_prs", [])),
             no_issue_prs=set(data.get("no_issue_prs", [])),
             no_tests_prs=set(data.get("no_tests_prs", [])),
@@ -368,11 +394,11 @@ class StreamState:
             git_error_prs=set(data.get("git_error_prs", [])),
             other_failed_prs={int(k): v for k, v in data.get("other_failed_prs", {}).items()},
         )
-        # Enforce the invariant on load, not just via merge_from/mark_publish_failed. A PR
-        # pending publication must not also be in processed_prs, or the fetcher skips it as
-        # already-processed (that check runs before the publish_failed exemption) and never
-        # retries. Guards against legacy state files and hand edits.
-        state.processed_prs -= state.publish_failed_prs
+        # Enforce the invariant on load, not just via merge_from/mark_*. A PR still pending
+        # (publish failed, or Claude rate-limited) must not also be in processed_prs, or the
+        # fetcher skips it as already-processed (that check runs before the resume-skip
+        # exemption) and never retries. Guards against legacy state files and hand edits.
+        state.processed_prs -= state.publish_failed_prs | state.claude_rate_limited_prs
         state._recompute_counters()
         return state
 

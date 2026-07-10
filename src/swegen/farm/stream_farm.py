@@ -268,8 +268,11 @@ class StreamFarmer:
         # Mark as processed with detailed tracking
         if result.category == "rate_limited":
             # Do NOT consume the PR. Claude hit a rate/usage limit - nothing was generated,
-            # and a re-run with a fresh token must still farm this PR. The run aborts below.
-            pass
+            # and a re-run with a fresh token must still farm this PR. Record it (not just
+            # skip) so the fetcher exempts it from the resume-time skip; otherwise a PR
+            # sharing the cursor's exact created_at would be dropped and never retried.
+            # The run aborts below.
+            self.state.mark_claude_rate_limited(pr.number)
         elif result.category == "publish_failed":
             # Do NOT consume the PR. The task is valid and only publishing failed, so the
             # next run must retry it rather than skip it. That retry is publish-only (see
@@ -566,6 +569,10 @@ class StreamFarmer:
                 table.add_row("  Git Errors", str(len(self.state.git_error_prs)))
             if self.state.publish_failed_prs:
                 table.add_row("  Publish Failed", str(len(self.state.publish_failed_prs)))
+            if self.state.claude_rate_limited_prs:
+                table.add_row(
+                    "  Claude Rate-Limited", str(len(self.state.claude_rate_limited_prs))
+                )
             if self.state.other_failed_prs:
                 table.add_row("  Other Errors", str(len(self.state.other_failed_prs)))
 
