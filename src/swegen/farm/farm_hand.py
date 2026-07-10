@@ -14,7 +14,6 @@ from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
 from swegen.create.claude_code_runner import ClaudeRateLimitError
 from swegen.create.create import publish_existing_task, run_reversal
-from swegen.create.task_reference import TaskReferenceStore
 from swegen.publish import PublishError
 
 
@@ -430,20 +429,13 @@ def _run_reversal_for_pr_impl(
         if gate_ok:
             _print_success(console, pr, task_id, harbor_dir, pr_url)
 
-            # Save task reference for future PRs
-            try:
-                reference_store = TaskReferenceStore()
-                reference_store.save(
-                    repo=config.repo,
-                    task_id=task_id,
-                    pr_number=pr.number,
-                )
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not save task reference: {e}[/yellow]")
+            # The task reference is saved inside run_reversal, at validation time and before
+            # publish, so it also covers a task that fails to publish or is republished on
+            # retry (which never calls run_reversal). Nothing to save here.
 
-            # Free disk on constrained sandboxes now the task is on the dataset repo. Last,
-            # after the reference save; self-guards on publish enabled + not dry-run. Under
-            # --publish-dry-run this no-ops and the PR is left unprocessed for a real run.
+            # Free disk on constrained sandboxes now the task is on the dataset repo.
+            # Self-guards on publish enabled + not dry-run. Under --publish-dry-run this
+            # no-ops and the PR is left unprocessed for a real run.
             _cleanup_local_if_published(config, task_id, tasks_root, console)
 
             return TaskResult(

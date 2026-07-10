@@ -30,6 +30,7 @@ from .claude_code_runner import (
     run_claude_code_session,
 )
 from .repo_cache import RepoCache
+from .task_reference import TaskReferenceStore
 
 # -----------------------------------------------------------------------------
 # Helper functions for run_reversal phases
@@ -293,6 +294,31 @@ def _save_state_record(
     except Exception as e:
         # Catch-all for unexpected errors, but still log them
         logger.warning(f"Unexpected error saving state record for {repo_key}: {e}", exc_info=True)
+
+
+def _save_task_reference(
+    console: Console,
+    config: CreateConfig,
+    repo: str,
+    task_id: str,
+    pr: int,
+    task_dir: Path,
+) -> None:
+    """Record this validated task as the repo's reference for faster future generation.
+
+    Skipped under --cleanup-local: the task directory is deleted after publishing, and a
+    reference tells Claude Code to read that directory - a dangling pointer helps nobody.
+    Non-fatal: a reference is only a speed-up, so a failure is warned, not raised.
+    """
+    if config.publish is not None and config.publish.cleanup_local:
+        return
+    try:
+        reference_file = Path(config.state_dir) / "task_references.json"
+        TaskReferenceStore(reference_file=reference_file).save(
+            repo=repo, task_id=task_id, pr_number=pr
+        )
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not save task reference: {e}[/yellow]")
 
 
 def _cleanup_local_task(console: Console, task_dir: Path) -> None:
@@ -842,6 +868,11 @@ def run_reversal(config: CreateConfig) -> str | None:
         _handle_validation_failure(
             console, harbor_validation_failed, cc_validation_failed, harbor_actually_ran
         )
+
+        # Save the task reference now: the task is validated, and this is BEFORE publish, so
+        # a task that then fails to publish (or is republished on retry, which never calls
+        # run_reversal) still records its reference for faster future generation.
+        _save_task_reference(console, config, pipeline.repo, task_id, config.pr, task_dir)
 
         # Publish before recording the dedupe entry, so a task that never reached the
         # dataset repo is not recorded as fully done.
