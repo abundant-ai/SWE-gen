@@ -37,6 +37,7 @@ def _build_publish_config(
     publish_state_path: str,
     publish_clone_dir: Path | None,
     publish_dry_run: bool,
+    publish_cleanup_local: bool = False,
 ) -> PublishConfig | None:
     """Build a PublishConfig from CLI options, or None when publishing is off.
 
@@ -64,6 +65,7 @@ def _build_publish_config(
         state_path=publish_state_path,
         clone_dir=publish_clone_dir,
         dry_run=publish_dry_run,
+        cleanup_local=publish_cleanup_local,
         author_name=os.environ.get("GIT_AUTHOR_NAME", DEFAULT_AUTHOR_NAME),
         author_email=os.environ.get("GIT_AUTHOR_EMAIL", DEFAULT_AUTHOR_EMAIL),
     )
@@ -189,6 +191,12 @@ def create_cmd(
         "--publish-dry-run",
         help="Clone, branch and commit locally but never push or open a PR",
     ),
+    publish_cleanup_local: bool = typer.Option(
+        False,
+        "--cleanup-local",
+        help="Delete the local task copy once it is published to the dataset repo "
+        "(frees disk on constrained sandboxes; never deletes an unpublished task)",
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Increase output verbosity"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Reduce output verbosity"),
 ) -> None:
@@ -218,6 +226,7 @@ def create_cmd(
             publish_state_path,
             publish_clone_dir,
             publish_dry_run,
+            publish_cleanup_local,
         ),
         verbose=verbose,
         quiet=quiet,
@@ -546,6 +555,12 @@ def farm(
         "--publish-dry-run",
         help="Clone, branch and commit locally but never push or open a PR",
     ),
+    publish_cleanup_local: bool = typer.Option(
+        False,
+        "--cleanup-local",
+        help="Delete the local task copy once it is published to the dataset repo "
+        "(frees disk on constrained sandboxes; never deletes an unpublished task)",
+    ),
 ) -> None:
     """
     Continuously process merged GitHub PRs and convert them to Harbor tasks.
@@ -588,6 +603,7 @@ def farm(
             publish_state_path,
             publish_clone_dir,
             publish_dry_run,
+            publish_cleanup_local,
         ),
     )
 

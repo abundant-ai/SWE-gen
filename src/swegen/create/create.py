@@ -290,6 +290,22 @@ def _save_state_record(
         logger.warning(f"Unexpected error saving state record for {repo_key}: {e}", exc_info=True)
 
 
+def _cleanup_local_task(console: Console, task_dir: Path) -> None:
+    """Delete the local task directory after it has been durably published.
+
+    Caller must have confirmed the task reached the dataset repo. Non-fatal: a failed
+    delete only wastes disk, so it is logged, not raised.
+    """
+    import shutil
+
+    try:
+        if task_dir.exists():
+            shutil.rmtree(task_dir)
+            console.print(f"[dim]Removed local task copy {task_dir} (published)[/dim]")
+    except OSError as e:
+        console.print(f"[yellow]Could not remove local task copy {task_dir}: {e}[/yellow]")
+
+
 def _preflight_publish(console: Console, config: CreateConfig, repo: str) -> TaskSink:
     """Build the sink and verify the dataset repo is writable, before any work begins.
 
@@ -567,9 +583,7 @@ def run_reversal(config: CreateConfig) -> str | None:
                 # whose push failed records published=False). Publish it rather than
                 # returning as if the work were done, and never regenerate - that would
                 # delete a valid task.
-                result = publish_existing_task(
-                    console, config, pipeline.repo, config.pr, duplicate
-                )
+                result = publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
                 # Supersede the unpublished record once the republish actually reaches the
                 # dataset repo. Key on `published`, not the URL: a task already merged into
                 # the base branch republishes with published=True and no URL, and keying on
@@ -848,6 +862,11 @@ def run_reversal(config: CreateConfig) -> str | None:
         pr_url = publish_result.pr_url if publish_result else None
         published = publish_result.published if publish_result else True
 
+        # Whether the task actually reached the dataset repo (a real branch/PR, or already
+        # merged into base). Distinct from `published` above, which is True even when
+        # publishing is disabled - keying cleanup on that would delete the only copy.
+        did_publish = publish_result is not None and publish_result.published
+
         # Save state record (non-fatal if fails)
         _save_state_record(
             state_dir,
@@ -862,7 +881,13 @@ def run_reversal(config: CreateConfig) -> str | None:
 
         # Display final panels
         _display_summary_panel(
-            console, pipeline.repo, config.pr, task_id, task_dir, gen_log_path, validation_table,
+            console,
+            pipeline.repo,
+            config.pr,
+            task_id,
+            task_dir,
+            gen_log_path,
+            validation_table,
             linked_issues=linked_issues,
         )
         _display_logs_panel(
@@ -872,6 +897,14 @@ def run_reversal(config: CreateConfig) -> str | None:
             harbor_oracle_job_dir,
         )
         _display_next_steps_panel(console, harbor_root, task_id)
+
+        # Cleanup is the LAST step: everything above (summary panel, state record) reads the
+        # task dir. Only ever deletes a task that reached the dataset repo, so the remote is
+        # the surviving copy. The farm suppresses this (passes cleanup_local=False) and does
+        # its own cleanup after saving a task reference.
+        if config.publish is not None and config.publish.cleanup_local and did_publish:
+            _cleanup_local_task(console, task_dir)
+
         return pr_url
     except PublishError as e:
         # Already-diagnosed publish failure: show the reason, skip the traceback.

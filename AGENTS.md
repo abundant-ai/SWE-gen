@@ -104,6 +104,7 @@ Key options:
 - `--publish-state-path`: Default `state`
 - `--publish-clone-dir`: Default `<state-dir>/publish/<dataset_slug>/<source_slug>`
 - `--publish-dry-run`: Clone, branch and commit locally; never push or open a PR
+- `--cleanup-local`: Delete each local task copy once it is published to the dataset repo
 
 **Contract with the dataset repo:** task PRs touch only `tasks/<task_id>/`, so PRs from
 different source repos merge into `main` without conflict. Do **not** add a top-level
@@ -188,6 +189,21 @@ collisions (`task_pr_urls`, `successful_prs`, `other_failed_prs`).
 nothing, so neither consumes a source PR — a later real run must still farm it. The
 prune/progress cadences are driven by a per-run `prs_seen` counter rather than
 `state.total_processed`, which a dry run leaves at zero.
+
+**`--cleanup-local`** deletes each local task directory once it is durably published (a real
+branch/PR on the dataset repo), to free disk on constrained sandboxes. It never fires on a
+dry run, a publish failure, or when publishing is disabled — the dataset repo must be the
+surviving copy. Cleanup is the last step, after the state record and the task-reference save;
+the farm suppresses `run_reversal`'s own cleanup (`cleanup_local=False` in the generated
+config) so the task dir still exists for the success gate and the reference save, then cleans
+up itself. A genuinely missing task dir (a pipeline bug, not a cleanup) still fails the gate.
+
+**A task that exists on disk but not in the dataset repo is republished, not consumed.** If a
+farm run hits `FileExistsError` (a validated task dir survives but `create.jsonl` can't
+dedupe it — e.g. a `--publish-dry-run` built it, or `.swegen` was cleared) and publishing is
+on, the farm republishes the existing task via `publish_existing_task` rather than marking the
+PR `already_exists` and moving on unpublished. If that republish fails it becomes
+`publish_failed` (task preserved), symmetric with the publish-only retry.
 
 `--reset` with `--publish-repo` overwrites the durable state branch, not just a local file —
 every PR recorded there gets regenerated. The farm prints a warning; the behavior is intended.

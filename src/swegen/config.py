@@ -30,6 +30,10 @@ class PublishConfig:
             .swegen/publish/<dataset_slug>/<source_slug>, keyed by source repo so two
             farms sharing a host never fight over one working tree.
         dry_run: Perform local clone/branch/commit but skip pushes and PR creation
+        cleanup_local: Delete the local task directory once the task is durably published
+            (a real PR/branch on the dataset repo). Frees disk on resource-constrained
+            sandboxes. Never deletes on dry-run, on publish failure, or when the task was
+            not actually published - the dataset repo must hold the only surviving copy.
         author_name: git author/committer name for task and state commits
         author_email: git author/committer email for task and state commits
     """
@@ -43,6 +47,7 @@ class PublishConfig:
     state_path: str = "state"
     clone_dir: Path | None = None
     dry_run: bool = False
+    cleanup_local: bool = False
     author_name: str = "aman-abundant"
     author_email: str = "aman@abundant.systems"
 

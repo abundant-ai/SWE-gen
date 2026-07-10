@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +19,37 @@ from swegen.publish import PublishError
 
 def _now_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def _publish_for_generation(config: FarmConfig):
+    """Publish config for a farm-driven run_reversal, with local cleanup suppressed.
+
+    The farm cleans up itself, AFTER saving a task reference and passing its success gate.
+    Letting run_reversal delete the task dir first would break the gate (missing dir reads
+    as a pipeline failure) and leave the task reference pointing at a deleted directory.
+    """
+    if config.publish is None:
+        return None
+    return replace(config.publish, cleanup_local=False)
+
+
+def _cleanup_local_if_published(
+    config: FarmConfig, task_id: str, tasks_root: Path, console: Console
+) -> None:
+    """Delete the local task copy when --cleanup-local is set and publishing is real.
+
+    Called only on a confirmed publish (a real branch/PR on the dataset repo), so the
+    remote is the surviving copy. Never runs under dry-run - nothing was published.
+    """
+    if config.publish is None or not config.publish.cleanup_local or config.publish.dry_run:
+        return
+    task_dir = tasks_root / task_id
+    try:
+        if task_dir.exists():
+            shutil.rmtree(task_dir)
+            console.print(f"[dim]Removed local task copy {task_dir} (published)[/dim]")
+    except OSError as e:
+        console.print(f"[yellow]Could not remove local task copy {task_dir}: {e}[/yellow]")
 
 
 def _slug(repo: str) -> str:
@@ -77,7 +108,7 @@ def _cleanup_task(task_id: str, tasks_root: Path, console: Console) -> None:
 
 def _classify_failure(stderr: str) -> tuple[str, str]:
     """Classify failure reason and return (category, message).
-    
+
     Categories:
     - trivial: Trivial PR (too small/simple)
     - no_issue: No linked issue
@@ -116,7 +147,7 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
         return "git_error", "Git commit not found (may be force-pushed or deleted)"
     if "git checkout" in lowered:
         return "git_error", "Git checkout failed (repo cache may be corrupted)"
-    
+
     message = (stderr or "Unknown error").replace("\n", " ")
     return "other", message
 
@@ -183,13 +214,15 @@ def _retry_publish_only(
         state_dir=config.state_dir,
         verbose=config.verbose,
         environment=config.environment,
-        publish=config.publish,
+        publish=_publish_for_generation(config),
     )
     record = {"task_id": task_id, "harbor": str(harbor_dir)}
     result = publish_existing_task(console, create_config, config.repo, pr.number, record)
     pr_url = result.pr_url if result else None
 
     _print_success(console, pr, task_id, harbor_dir, pr_url)
+    if result is not None and result.published:
+        _cleanup_local_if_published(config, task_id, harbor_dir.parent, console)
     return TaskResult(
         repo=config.repo,
         pr_number=pr.number,
@@ -300,7 +333,7 @@ def _run_reversal_for_pr_impl(
         require_issue=config.require_issue,
         environment=config.environment,
         enforce_offline_tests=config.enforce_offline_tests,
-        publish=config.publish,
+        publish=_publish_for_generation(config),
     )
 
     # Capture any errors from the pipeline
@@ -336,7 +369,15 @@ def _run_reversal_for_pr_impl(
         error_category = "validation_failed"
         success = False
     except FileExistsError as e:
-        # Task already exists - skip it
+        # A task directory already exists and run_reversal's create.jsonl dedupe did not
+        # republish it - typically because create.jsonl was unavailable (a separate
+        # --state-dir, a cleared .swegen, or a --publish-dry-run run on another disk) while
+        # the validated task survived. With publishing on and the task on disk, republish
+        # it rather than consuming the PR unpublished, symmetric with the publish_failed
+        # retry. If republishing fails, _retry_publish_only raises PublishError, which the
+        # outer handler classifies as publish_failed and the task is preserved.
+        if config.publish is not None and harbor_dir.exists():
+            return _retry_publish_only(pr, config, console, task_id, harbor_dir, start)
         error_msg = f"Task already exists: {str(e)}"
         error_category = "already_exists"
         success = False
@@ -389,6 +430,11 @@ def _run_reversal_for_pr_impl(
                 )
             except Exception as e:
                 console.print(f"[yellow]Warning: Could not save task reference: {e}[/yellow]")
+
+            # Free disk on constrained sandboxes now the task is on the dataset repo. Last,
+            # after the reference save; self-guards on publish enabled + not dry-run. Under
+            # --publish-dry-run this no-ops and the PR is left unprocessed for a real run.
+            _cleanup_local_if_published(config, task_id, tasks_root, console)
 
             return TaskResult(
                 repo=config.repo,
