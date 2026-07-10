@@ -257,6 +257,14 @@ class StreamFarmer:
             # next run must retry it rather than skip it. Publishing is idempotent: it
             # finds the stale branch, recommits, and opens the PR that never got created.
             self.state.mark_publish_failed(pr.number)
+        elif result.status == "success" and self._publish_is_dry_run():
+            # Also do NOT consume the PR. The task was generated and validated but nothing
+            # reached the dataset repo, so a later real run must still farm this PR. The
+            # local mirror persists, and without this a dry run would silently poison it.
+            self.console.print(
+                f"[cyan]DRY RUN: task built but not published; leaving PR #{pr.number} "
+                f"unprocessed so a real run will farm it[/cyan]"
+            )
         else:
             self.state.mark_processed(
                 pr.number,
@@ -290,6 +298,10 @@ class StreamFarmer:
         if self.config.docker_prune_batch > 0:
             if self.state.total_processed % self.config.docker_prune_batch == 0:
                 self._prune_docker()
+
+    def _publish_is_dry_run(self) -> bool:
+        """True when publishing is configured but pushes and PR creation are suppressed."""
+        return self.config.publish is not None and self.config.publish.dry_run
 
     def _abort(self, reason: str, detail: str = "", state_saved: bool = True) -> None:
         """Stop the run loudly, so an operator can reach the sandbox before reclamation.

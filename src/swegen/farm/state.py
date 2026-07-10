@@ -99,6 +99,37 @@ class StreamState:
         if self.other_failed_prs is None:
             self.other_failed_prs = {}
 
+    # Every set holding a per-PR failure/skip outcome. A PR belongs to at most one of
+    # these, plus successful_prs and other_failed_prs, which are handled alongside.
+    _FAILURE_SETS = (
+        "trivial_prs",
+        "no_issue_prs",
+        "no_tests_prs",
+        "validation_failed_prs",
+        "already_exists_prs",
+        "rate_limit_prs",
+        "quota_exceeded_prs",
+        "timeout_prs",
+        "git_error_prs",
+        "publish_failed_prs",
+    )
+
+    def _clear_outcome(self, pr_number: int, *, keep_success: bool = False) -> None:
+        """Remove `pr_number` from every outcome bucket.
+
+        A PR has exactly one outcome. Recording a new one must evict the old, or the PR
+        sits in two buckets at once and _recompute_counters counts it as both successful
+        and failed. `keep_success` preserves successful_prs/task_pr_urls when the new
+        outcome is itself a success, so a success re-recorded without a task_id does not
+        erase the task_id from the first one.
+        """
+        for name in self._FAILURE_SETS:
+            getattr(self, name).discard(pr_number)
+        self.other_failed_prs.pop(pr_number, None)
+        if not keep_success:
+            self.successful_prs.pop(pr_number, None)
+            self.task_pr_urls.pop(pr_number, None)
+
     def mark_processed(
         self, pr_number: int, created_at: str, success: bool, task_id: str = None,
         category: str = None, message: str = None, pr_url: str = None
@@ -117,10 +148,10 @@ class StreamState:
         self.processed_prs.add(pr_number)
         self.total_processed += 1
 
-        # A PR reaching a terminal outcome is no longer a pending publish failure. Without
-        # this, a successful retry would leave the PR in publish_failed_prs forever and the
-        # durable state / summaries would keep reporting a failure that has been resolved.
-        self.publish_failed_prs.discard(pr_number)
+        # This outcome supersedes any earlier one - notably a pending publish failure that
+        # a retry has now resolved. Leaving the PR in its old bucket would report a failure
+        # that no longer exists, and double-count it against the new outcome.
+        self._clear_outcome(pr_number, keep_success=success)
 
         if success:
             self.successful += 1
@@ -160,19 +191,10 @@ class StreamState:
 
     def _failed_pr_numbers(self) -> set[int]:
         """Every PR with a recorded failure or skip, across all categories."""
-        return (
-            self.trivial_prs
-            | self.no_issue_prs
-            | self.no_tests_prs
-            | self.validation_failed_prs
-            | self.already_exists_prs
-            | self.rate_limit_prs
-            | self.quota_exceeded_prs
-            | self.timeout_prs
-            | self.git_error_prs
-            | self.publish_failed_prs
-            | set(self.other_failed_prs)
-        )
+        failed: set[int] = set(self.other_failed_prs)
+        for name in self._FAILURE_SETS:
+            failed |= getattr(self, name)
+        return failed
 
     def _recompute_counters(self) -> None:
         """Derive counters from the recorded sets rather than incrementing blindly.
@@ -198,6 +220,7 @@ class StreamState:
         fails, which would otherwise strand a branch on the remote with no PR and no way
         for the farm to reach it again.
         """
+        self._clear_outcome(pr_number)
         self.publish_failed_prs.add(pr_number)
         self.last_updated = datetime.now(UTC).isoformat()
         self._recompute_counters()
@@ -223,27 +246,41 @@ class StreamState:
         if other.repo != self.repo:
             raise ValueError(f"Cannot merge state for {other.repo} into {self.repo}")
 
+        # A PR carries exactly ONE outcome. Where both sides judged the same PR, the
+        # receiver's verdict stands - it is the fresher state - so `other` may never add
+        # that PR to a second, contradictory bucket. Snapshot our verdicts before merging.
+        own_failed = self._failed_pr_numbers()
+        own_verdicts = set(self.successful_prs) | own_failed
+
         self.processed_prs |= other.processed_prs
         self.skip_list_prs |= other.skip_list_prs
-        self.trivial_prs |= other.trivial_prs
-        self.no_issue_prs |= other.no_issue_prs
-        self.no_tests_prs |= other.no_tests_prs
-        self.validation_failed_prs |= other.validation_failed_prs
-        self.already_exists_prs |= other.already_exists_prs
-        self.rate_limit_prs |= other.rate_limit_prs
-        self.quota_exceeded_prs |= other.quota_exceeded_prs
-        self.timeout_prs |= other.timeout_prs
-        self.git_error_prs |= other.git_error_prs
+        for name in self._FAILURE_SETS:
+            getattr(self, name).update(getattr(other, name) - own_verdicts)
 
         # Receiver wins on key collision; callers pass the staler state as `other`.
-        self.successful_prs = {**other.successful_prs, **self.successful_prs}
+        self.successful_prs = {
+            **{pr: t for pr, t in other.successful_prs.items() if pr not in own_failed},
+            **self.successful_prs,
+        }
         self.task_pr_urls = {**other.task_pr_urls, **self.task_pr_urls}
-        self.other_failed_prs = {**other.other_failed_prs, **self.other_failed_prs}
+        self.other_failed_prs = {
+            **{pr: m for pr, m in other.other_failed_prs.items() if pr not in own_verdicts},
+            **self.other_failed_prs,
+        }
 
-        # A PR published by either writer is no longer a pending publish failure.
-        self.publish_failed_prs |= other.publish_failed_prs
+        # Anything now recorded as successful cannot also be a failure. This scrubs the
+        # staler side's failure verdict for PRs we later saw succeed; without it a PR sits
+        # in two buckets and _recompute_counters scores it as both successful and failed.
+        for pr_number in set(self.successful_prs):
+            for name in self._FAILURE_SETS:
+                getattr(self, name).discard(pr_number)
+            self.other_failed_prs.pop(pr_number, None)
+
+        # A PR still pending publication must stay UNCONSUMED, even though the staler side
+        # recorded it as processed. Subtracting the other way would let `other.processed_prs`
+        # swallow our pending retry and the PR would never be farmed again.
         self.publish_failed_prs -= set(self.successful_prs)
-        self.publish_failed_prs -= self.processed_prs
+        self.processed_prs -= self.publish_failed_prs
 
         self.total_fetched = max(self.total_fetched, other.total_fetched)
         if other.last_created_at and (
