@@ -258,8 +258,13 @@ def _save_state_record(
     pr: int,
     task_id: str,
     task_dir: Path,
+    published: bool = True,
 ) -> None:
     """Save a record of the generated task to the state file.
+
+    Written even when publishing failed (`published=False`), so a rerun's dedupe check
+    finds the task and republishes it instead of hitting FileExistsError and needing
+    --force, which would delete the validated task.
 
     This is non-fatal - errors are logged but do not stop execution.
     """
@@ -273,6 +278,7 @@ def _save_state_record(
             "task_id": task_id,
             "harbor": str(task_dir.resolve()),
             "ts": datetime.now(UTC).isoformat(),
+            "published": published,
         }
         with open(state_file, "a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -537,9 +543,23 @@ def run_reversal(config: CreateConfig) -> str | None:
         state_file = state_dir / "create.jsonl"
         duplicate = _check_dedupe(console, repo_key, state_file, config.force)
         if duplicate is not None:
-            # The task exists on disk but may never have been published. Publish it rather
-            # than returning as if the work were done.
-            return publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
+            # The task exists on disk but may never have been published (a prior run whose
+            # push failed records published=False). Publish it rather than returning as if
+            # the work were done, and never regenerate - that would delete a valid task.
+            pr_url = publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
+            if pr_url and not duplicate.get("published", True):
+                # Recovered: supersede the unpublished record so later runs see it as done.
+                _save_state_record(
+                    state_dir,
+                    state_file,
+                    repo_key,
+                    pipeline.repo,
+                    config.pr,
+                    duplicate.get("task_id") or Path(duplicate["harbor"]).name,
+                    Path(duplicate["harbor"]),
+                    published=True,
+                )
+            return pr_url
 
         # Verify the dataset repo is writable before spending a Claude Code session on a
         # task we would then be unable to publish.
@@ -770,12 +790,29 @@ def run_reversal(config: CreateConfig) -> str | None:
             console, harbor_validation_failed, cc_validation_failed, harbor_actually_ran
         )
 
-        # Publish before recording the dedupe entry. A task written to create.jsonl but
-        # never published would be skipped by the next run's dedupe check, leaving no way
-        # to retry the publish without --force.
-        pr_url = _publish_task(
-            console, config, sink, pipeline.repo, config.pr, task_id, task_dir, metadata
-        )
+        # Publish before recording the dedupe entry, so a task that never reached the
+        # dataset repo is not recorded as fully done.
+        try:
+            pr_url = _publish_task(
+                console, config, sink, pipeline.repo, config.pr, task_id, task_dir, metadata
+            )
+        except PublishError:
+            # Still record the task, flagged unpublished. The task is valid - only the push
+            # failed - and without a record a rerun would hit FileExistsError on the task
+            # directory and need --force, which deletes it. With the record, dedupe finds
+            # the task and republishes it (publish_existing_task), matching the farm's
+            # publish-only retry.
+            _save_state_record(
+                state_dir,
+                state_file,
+                repo_key,
+                pipeline.repo,
+                config.pr,
+                task_id,
+                task_dir,
+                published=False,
+            )
+            raise
 
         # Save state record (non-fatal if fails)
         _save_state_record(

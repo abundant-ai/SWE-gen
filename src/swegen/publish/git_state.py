@@ -61,7 +61,25 @@ class GitStateStore:
             return
         self.git.ensure_clone(f"https://github.com/{self.cfg.repo}.git")
         self.git.add_worktree(self.worktree, self.branch, f"origin/{self.cfg.base_branch}")
+        self._sync_worktree()
         self._ready = True
+
+    def _sync_worktree(self) -> None:
+        """Fast-forward the state worktree onto the remote branch.
+
+        add_worktree() returns an existing worktree untouched, so a clone left over from an
+        earlier run holds whatever snapshot it was last on. Reading that would resume from a
+        stale cursor and silently drop processed_prs and publish_failed_prs recorded by a
+        later run - exactly what the state branch exists to prevent.
+
+        A hard reset is safe: the worktree only ever holds the state JSON, which is
+        regenerated from the in-memory state on every save, and anything not yet pushed also
+        lives in the local mirror.
+        """
+        if not self.git.remote_branch_exists(self.branch):
+            return
+        self.git.fetch(self.branch)
+        self.git.git("reset", "--hard", f"origin/{self.branch}", cwd=self.worktree)
 
     # -- StateStore protocol -------------------------------------------------
 
