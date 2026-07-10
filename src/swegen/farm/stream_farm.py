@@ -272,19 +272,10 @@ class StreamFarmer:
         # Show result
         self._print_result(result)
 
-        # Any publish failure ends the run: every further PR would cost a full Claude
-        # Code session and then fail at the same wall.
-        if self._check_publish_health(result):
-            return
-
-        # A state push that fails is equally fatal: without a durable cursor a resumed
-        # sandbox would redo every PR from here.
-        if not state_saved:
-            self._abort(
-                "Farm state could not be pushed to the state branch. Continuing would "
-                "leave the durable cursor stale, so a resumed sandbox would regenerate "
-                "every PR processed from this point on."
-            )
+        # A publish failure or a failed state push ends the run. Checked together: both can
+        # fail in the same iteration, and reporting only the first would tell the operator
+        # farm state was preserved when it was not.
+        if self._check_publish_health(result, state_saved):
             return
 
         # Rate limit protection: sleep between PRs
@@ -300,39 +291,66 @@ class StreamFarmer:
             if self.state.total_processed % self.config.docker_prune_batch == 0:
                 self._prune_docker()
 
-    def _abort(self, reason: str, detail: str = "") -> None:
-        """Stop the run loudly, so an operator can reach the sandbox before reclamation."""
+    def _abort(self, reason: str, detail: str = "", state_saved: bool = True) -> None:
+        """Stop the run loudly, so an operator can reach the sandbox before reclamation.
+
+        `state_saved` must reflect whether the durable state branch actually advanced. A
+        publish failure and a state-push failure can happen in the same iteration, and
+        telling the operator that state was preserved when it was not sends them into the
+        next run expecting a resume that will not happen.
+        """
         self.aborted = True
         self.shutdown_requested = True
         body = reason
         if detail:
             body += f"\n\n{detail}"
-        body += (
-            "\n\nFix the token or GitHub connectivity, then re-run. Farm state is "
-            "preserved, so already-processed PRs will not be regenerated."
-        )
+
+        if state_saved:
+            body += (
+                "\n\nFix the token or GitHub connectivity, then re-run. Farm state is "
+                "preserved, so already-processed PRs will not be regenerated."
+            )
+        else:
+            body += (
+                "\n\nThe durable state branch was NOT updated: this run's progress exists "
+                f"only in the local mirror ({self.state_file}). Recover it before this "
+                "sandbox is reclaimed, or a re-run will regenerate the PRs processed here."
+            )
+
         self.console.print(
             Panel(Text(body, style="red"), title="[red]Stopping[/red]", border_style="red")
         )
 
-    def _check_publish_health(self, result: TaskResult) -> bool:
-        """Stop the run on any publish failure. Returns True if farming should stop.
+    def _check_publish_health(self, result: TaskResult, state_saved: bool) -> bool:
+        """Stop the run on a publish failure or a failed state push. True = stop farming.
 
-        No retry-and-continue: a rejected push cannot be distinguished from a broken
-        remote, and continuing would spend a full Claude Code session per PR only to
-        fail at the same wall. Stopping loudly is what lets an operator reach a Daytona
-        sandbox and recover the task before it is reclaimed.
+        Both are checked together because they can fail in the same iteration - a broken
+        GitHub breaks the task push and the state push alike - and the operator needs to
+        hear about both. No retry-and-continue: a rejected push cannot be distinguished
+        from a broken remote, and continuing would spend a full Claude Code session per PR
+        only to fail at the same wall. Stopping loudly is what lets an operator reach a
+        Daytona sandbox and recover the task before it is reclaimed.
         """
-        if result.category != "publish_failed":
+        publish_failed = result.category == "publish_failed"
+        if not publish_failed and state_saved:
             return False
 
-        self._abort(
-            result.message,
-            f"The task passed every validation gate and was left in "
-            f"{self.tasks_root}/{result.task_id} - it can be pushed by hand.\n"
-            f"On an ephemeral sandbox, recover it before the sandbox is reclaimed.\n"
-            f"PR #{result.pr_number} was left unprocessed, so a re-run will retry it.",
-        )
+        if publish_failed:
+            reason = result.message
+            detail = (
+                f"The task passed every validation gate and was left in "
+                f"{self.tasks_root}/{result.task_id} - it can be pushed by hand.\n"
+                f"On an ephemeral sandbox, recover it before the sandbox is reclaimed.\n"
+                f"PR #{result.pr_number} was left unprocessed, so a re-run will retry it."
+            )
+        else:
+            reason = "Farm state could not be pushed to the state branch."
+            detail = (
+                "Continuing would leave the durable cursor stale, so a resumed sandbox "
+                "would regenerate every PR processed from this point on."
+            )
+
+        self._abort(reason, detail, state_saved=state_saved)
         return True
 
     def _print_result(self, result: TaskResult) -> None:

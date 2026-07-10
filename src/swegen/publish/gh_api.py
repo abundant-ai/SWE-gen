@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 
@@ -121,8 +122,15 @@ class GitHubAPI:
         return self.request("GET", f"/repos/{repo}")
 
     def find_open_pr(self, repo: str, head_branch: str) -> dict | None:
+        """Find the open PR whose head is `head_branch`, if any.
+
+        The query is percent-encoded: branch names carry a `/` from the branch prefix, and
+        --publish-branch-prefix is user-supplied, so an `&` or `#` in it would otherwise
+        truncate or corrupt the query rather than simply not matching.
+        """
         owner = repo.split("/")[0]
-        prs = self.request("GET", f"/repos/{repo}/pulls?head={owner}:{head_branch}&state=open")
+        query = urlencode({"head": f"{owner}:{head_branch}", "state": "open"})
+        prs = self.request("GET", f"/repos/{repo}/pulls?{query}")
         return prs[0] if prs else None
 
     def create_pr(self, repo: str, title: str, body: str, head: str, base: str) -> dict:
