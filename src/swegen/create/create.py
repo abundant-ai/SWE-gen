@@ -329,11 +329,13 @@ def publish_existing_task(
     task_dir = Path(record.get("harbor", ""))
     task_id = record.get("task_id") or task_dir.name
     if not task_dir.exists():
-        console.print(
-            f"[yellow]Task {task_id} is recorded in state but missing from disk "
-            f"({task_dir}); nothing to publish. Use --force to regenerate.[/yellow]"
+        # Never return None here: the caller would read that as "published, nothing to do"
+        # and exit successfully having published nothing. Callers that can recover check
+        # the directory first and regenerate instead.
+        raise PublishError(
+            f"Task {task_id} is recorded in state but missing from disk ({task_dir}); "
+            f"nothing to publish."
         )
-        return None
 
     console.print(f"[cyan]Task already generated; publishing {task_id} from {task_dir}[/cyan]")
     sink = _preflight_publish(console, config, repo)
@@ -543,23 +545,36 @@ def run_reversal(config: CreateConfig) -> str | None:
         state_file = state_dir / "create.jsonl"
         duplicate = _check_dedupe(console, repo_key, state_file, config.force)
         if duplicate is not None:
-            # The task exists on disk but may never have been published (a prior run whose
-            # push failed records published=False). Publish it rather than returning as if
-            # the work were done, and never regenerate - that would delete a valid task.
-            pr_url = publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
-            if pr_url and not duplicate.get("published", True):
-                # Recovered: supersede the unpublished record so later runs see it as done.
-                _save_state_record(
-                    state_dir,
-                    state_file,
-                    repo_key,
-                    pipeline.repo,
-                    config.pr,
-                    duplicate.get("task_id") or Path(duplicate["harbor"]).name,
-                    Path(duplicate["harbor"]),
-                    published=True,
+            duplicate_dir = Path(duplicate.get("harbor", ""))
+            if not duplicate_dir.exists():
+                # Stale record: the task it names is gone, so there is nothing to publish
+                # and nothing to protect. Fall through and regenerate rather than exiting
+                # successfully having done nothing.
+                console.print(
+                    f"[yellow]Recorded task is missing from disk ({duplicate_dir}); "
+                    f"regenerating.[/yellow]"
                 )
-            return pr_url
+            else:
+                # The task exists on disk but may never have been published (a prior run
+                # whose push failed records published=False). Publish it rather than
+                # returning as if the work were done, and never regenerate - that would
+                # delete a valid task.
+                pr_url = publish_existing_task(
+                    console, config, pipeline.repo, config.pr, duplicate
+                )
+                if pr_url and not duplicate.get("published", True):
+                    # Recovered: supersede the unpublished record so later runs see it done.
+                    _save_state_record(
+                        state_dir,
+                        state_file,
+                        repo_key,
+                        pipeline.repo,
+                        config.pr,
+                        duplicate.get("task_id") or duplicate_dir.name,
+                        duplicate_dir,
+                        published=True,
+                    )
+                return pr_url
 
         # Verify the dataset repo is writable before spending a Claude Code session on a
         # task we would then be unable to publish.
