@@ -23,7 +23,12 @@ from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
-from .claude_code_runner import ClaudeCodeResult, run_claude_code_session
+from .claude_code_runner import (
+    ClaudeCodeResult,
+    ClaudeRateLimitError,
+    is_rate_limit_failure,
+    run_claude_code_session,
+)
 from .repo_cache import RepoCache
 
 # -----------------------------------------------------------------------------
@@ -708,6 +713,13 @@ def run_reversal(config: CreateConfig) -> str | None:
 
             gen_secs = time.perf_counter() - t0
 
+            # A rate/usage limit is not this task's fault and will hit every following task
+            # until the token is swapped. Raise so the farm aborts and the PR is left
+            # unprocessed for a re-run with a fresh token, rather than reporting the task as
+            # a validation failure and moving on.
+            if cc_result and not cc_result.success and is_rate_limit_failure(cc_result.error_message):
+                raise ClaudeRateLimitError(cc_result.error_message or "Claude rate limit")
+
             if cc_result and cc_result.success:
                 console.print()
                 console.print(f"[green]✓ Task generated and validated in {gen_secs:.1f}s[/green]")
@@ -906,6 +918,21 @@ def run_reversal(config: CreateConfig) -> str | None:
             _cleanup_local_task(console, task_dir)
 
         return pr_url
+    except ClaudeRateLimitError as e:
+        # Anthropic rate/usage limit: not this task's fault, and fatal for a farm run.
+        console.print(
+            Panel(
+                Text(
+                    f"Claude Code hit a rate/usage limit:\n{e}\n\n"
+                    f"Every task draws from the same limit, so this will not clear until the "
+                    f"token or account is swapped. Re-run with a fresh token.",
+                    style="red",
+                ),
+                title="[red]Claude Rate Limit[/red]",
+                border_style="red",
+            )
+        )
+        raise
     except PublishError as e:
         # Already-diagnosed publish failure: show the reason, skip the traceback.
         console.print(

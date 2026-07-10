@@ -16,6 +16,7 @@ from swegen.create.create import run_reversal
 from swegen.farm import StreamFarmer
 from swegen.analyze import AnalyzeArgs, run_analyze
 from swegen.analyze.classifier import VERDICT_MODEL
+from swegen.create.claude_code_runner import ClaudeRateLimitError
 from swegen.publish import PublishError
 from swegen.tools.validate import ValidateArgs, run_validate
 from swegen.tools.validate_utils import ValidationError
@@ -239,6 +240,7 @@ def create_cmd(
         ValidationError,
         FileExistsError,
         PublishError,
+        ClaudeRateLimitError,
     ) as err:
         # These exceptions have already displayed user-friendly messages
         # Exit with error code but don't show traceback

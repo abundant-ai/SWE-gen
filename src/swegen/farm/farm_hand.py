@@ -12,6 +12,7 @@ from rich.panel import Panel
 
 from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
+from swegen.create.claude_code_runner import ClaudeRateLimitError
 from swegen.create.create import publish_existing_task, run_reversal
 from swegen.create.task_reference import TaskReferenceStore
 from swegen.publish import PublishError
@@ -123,8 +124,10 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
     - other: Unknown/other errors
     """
     lowered = stderr.lower()
-    # Checked first: a publish error wraps git/HTTP output that would otherwise match
-    # the "timeout" or "git" heuristics below.
+    # Checked first: these wrap git/HTTP/SDK output that would otherwise match the
+    # "timeout" or "git" heuristics below.
+    if "claude rate limit" in lowered or "rate_limit_event" in lowered:
+        return "rate_limited", (stderr or "Claude rate limit").replace("\n", " ")
     if "publish failed" in lowered:
         return "publish_failed", (stderr or "Publish failed").replace("\n", " ")
     if "trivial" in stderr:
@@ -346,6 +349,13 @@ def _run_reversal_for_pr_impl(
         # Call the pipeline directly instead of using subprocess
         pr_url = run_reversal(create_config)
         success = True
+    except ClaudeRateLimitError as e:
+        # Anthropic rate/usage limit. Not this PR's fault and it will hit every following
+        # task the same way until the token is swapped, so the farmer stops the run and the
+        # PR is left unprocessed for a re-run with a fresh token.
+        error_msg = f"Claude rate limit: {e}"
+        error_category = "rate_limited"
+        success = False
     except PublishError as e:
         # Task was built and validated but never reached the dataset repo. The farmer
         # stops the run on this category rather than burning a Claude Code session on

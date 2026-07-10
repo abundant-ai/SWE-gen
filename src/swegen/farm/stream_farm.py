@@ -266,7 +266,11 @@ class StreamFarmer:
         self.prs_seen += 1
 
         # Mark as processed with detailed tracking
-        if result.category == "publish_failed":
+        if result.category == "rate_limited":
+            # Do NOT consume the PR. Claude hit a rate/usage limit - nothing was generated,
+            # and a re-run with a fresh token must still farm this PR. The run aborts below.
+            pass
+        elif result.category == "publish_failed":
             # Do NOT consume the PR. The task is valid and only publishing failed, so the
             # next run must retry it rather than skip it. That retry is publish-only (see
             # publish_only above): publishing is idempotent, so it finds the branch this
@@ -355,20 +359,28 @@ class StreamFarmer:
         )
 
     def _check_publish_health(self, result: TaskResult, state_saved: bool) -> bool:
-        """Stop the run on a publish failure or a failed state push. True = stop farming.
+        """Stop the run on a fatal condition. True = stop farming.
 
-        Both are checked together because they can fail in the same iteration - a broken
-        GitHub breaks the task push and the state push alike - and the operator needs to
-        hear about both. No retry-and-continue: a rejected push cannot be distinguished
-        from a broken remote, and continuing would spend a full Claude Code session per PR
-        only to fail at the same wall. Stopping loudly is what lets an operator reach a
-        Daytona sandbox and recover the task before it is reclaimed.
+        Fatal: a publish failure, a failed state push, or a Claude rate/usage limit. Each
+        will recur on the next PR - a broken remote, or an exhausted token - so continuing
+        would spend a full Claude Code session per PR only to fail at the same wall.
+        Publish and state-push are checked together because a broken GitHub hits both in one
+        iteration and the operator needs to hear about both. Stopping loudly is what lets an
+        operator reach a Daytona sandbox before it is reclaimed.
         """
+        rate_limited = result.category == "rate_limited"
         publish_failed = result.category == "publish_failed"
-        if not publish_failed and state_saved:
+        if not rate_limited and not publish_failed and state_saved:
             return False
 
-        if publish_failed:
+        if rate_limited:
+            reason = result.message
+            detail = (
+                "Every task draws from the same limit, so this will not clear until the "
+                "token or account is swapped. Re-run with a fresh token.\n"
+                f"PR #{result.pr_number} was left unprocessed, so it will be farmed then."
+            )
+        elif publish_failed:
             reason = result.message
             detail = (
                 f"The task passed every validation gate and was left in "

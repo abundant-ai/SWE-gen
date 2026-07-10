@@ -128,6 +128,13 @@ push in `_finalize()` (which sets a nonzero exit code). Both are checked togethe
 abort that happens to hit both reports both — the panel never claims farm state was preserved
 when it was not. Non-publish failures (trivial, no-issue, validation) never abort.
 
+A **Claude rate/usage limit** also aborts (category `rate_limited`). Claude Code failures
+whose error matches a rate-limit signature — notably `rate_limit_event`, the SDK message
+that `claude-agent-sdk` fails to parse — are raised as `ClaudeRateLimitError` rather than
+swallowed into a validation failure. Every task draws from the same limit, so continuing is
+pointless until the token/account is swapped; the run stops and the source PR is left
+unprocessed so a re-run with a fresh token farms it. The abort panel says to swap the token.
+
 Tasks that fail to publish are **kept on disk** (unlike other failures, which are cleaned
 up): they passed every validation gate, so they are valid work that can be pushed by hand or
 by a re-run.
