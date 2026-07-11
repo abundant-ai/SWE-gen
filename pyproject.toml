@@ -30,7 +30,7 @@ dependencies = [
     "openai>=2.15.0",
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.1",
-    "claude-agent-sdk>=0.1.20",
+    "claude-agent-sdk>=0.2.116",  # 0.1.x cannot parse rate_limit_event and kills the stream
     "harbor>=0.17.1",
 ]
 
