@@ -399,12 +399,11 @@ def _run_reversal_for_pr_impl(
         error_category = "already_exists"
         success = False
     except Exception as e:
-        # Other errors
+        # Unexpected error: nothing set a category for us, so sniff the message.
         error_msg = f"{type(e).__name__}: {str(e)}"
         if config.verbose:
             console.print(f"[red]{traceback.format_exc()}[/red]")
-        # Classify the error
-        error_category, _ = _classify_failure(error_msg)
+        error_category, error_msg = _classify_failure(error_msg)
         success = False
 
     if success:
@@ -474,8 +473,12 @@ def _run_reversal_for_pr_impl(
             category=failure_category,
         )
 
-    # Pipeline failed
-    failure_category, failure_reason = _classify_failure(error_msg)
+    # Pipeline failed. Trust the category the handler above already established -- do not
+    # re-derive it by grepping the message. _classify_failure only recognises a trivial PR
+    # by the literal word "trivial", so a TrivialPRError raised for the file-count bounds
+    # ("Too many source files modified (14, max 10)") was landing in "other": it delayed
+    # 60s before the next PR and was counted under Other Errors in the summary.
+    failure_category, failure_reason = error_category, error_msg
 
     if failure_category == "publish_failed":
         # The task itself is valid - it passed every gate and only the push/PR failed.
