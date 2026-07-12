@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import time
 import traceback
@@ -160,6 +161,46 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
 
     message = (stderr or "Unknown error").replace("\n", " ")
     return "other", message
+
+
+# Friendly label per category, with the phrase that means the exception's own message
+# already says it. Typed exceptions carry the diagnostic detail ("Too many source files
+# modified (14, max 10)") that a bare label would throw away, so the label is only
+# prepended when the message does not already convey it -- otherwise it just stutters
+# ("Task already exists (skipped): Task already exists: ..."). Categories that arrive only
+# via _classify_failure are absent on purpose: their message *is* the friendly string.
+# Exceptions prefix themselves with the PR they concern ("PR #9413: ..." or
+# "PR #9413 is too trivial: ..."), and the callers print the reason as "PR #N: {message}".
+# Stripping the self-prefix is what removes the doubled "PR #9413: PR #9413:".
+_SELF_PREFIX_RE = re.compile(r"^PR #\d+\b(?:\s+is)?\s*:?\s*", re.IGNORECASE)
+
+CATEGORY_LABELS = {
+    "trivial": ("Trivial PR (skipped)", "trivial"),
+    "no_issue": ("No linked issue (skipped)", "linked issue"),
+    "validation_failed": ("Validation failed (NOP or Oracle)", "validation"),
+    "already_exists": ("Task already exists (skipped)", "already exists"),
+}
+
+
+def _failure_message(pr_number: int, category: str | None, error_msg: str) -> str:
+    """Render the human-facing reason for a failed PR.
+
+    Strips any leading "PR #N: " the exception prefixed itself with: the callers print
+    this as "PR #N: {message}", which is where the doubled "PR #9413: PR #9413:" in the
+    farm log came from.
+    """
+    detail = _SELF_PREFIX_RE.sub("", (error_msg or "").replace("\n", " ").strip())
+    if detail:
+        detail = detail[0].upper() + detail[1:]
+
+    label, spoken_for = CATEGORY_LABELS.get(category or "", (None, None))
+    if not label:
+        return detail or "Unknown error"
+    if not detail:
+        return label
+    if spoken_for in detail.lower():
+        return detail
+    return f"{label}: {detail}"
 
 
 def _print_success(
@@ -478,7 +519,8 @@ def _run_reversal_for_pr_impl(
     # by the literal word "trivial", so a TrivialPRError raised for the file-count bounds
     # ("Too many source files modified (14, max 10)") was landing in "other": it delayed
     # 60s before the next PR and was counted under Other Errors in the summary.
-    failure_category, failure_reason = error_category, error_msg
+    failure_category = error_category
+    failure_reason = _failure_message(pr.number, error_category, error_msg)
 
     if failure_category == "publish_failed":
         # The task itself is valid - it passed every gate and only the push/PR failed.
