@@ -662,6 +662,7 @@ def run_reversal(config: CreateConfig) -> str | None:
                 repo=pipeline.repo,
                 head_sha=metadata["head_sha"],
                 repo_url=metadata["repo_url"],
+                base_sha=metadata.get("base_sha"),
             )
             console.print(f"[dim]    Repo at: {repo_path}[/dim]")
 

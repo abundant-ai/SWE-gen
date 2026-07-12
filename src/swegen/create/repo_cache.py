@@ -24,6 +24,7 @@ class RepoCache:
         repo: str,
         head_sha: str,
         repo_url: str | None = None,
+        base_sha: str | None = None,
     ) -> Path:
         """
         Get cached repo or clone it. Checkout the specified commit.
@@ -32,6 +33,8 @@ class RepoCache:
             repo: Repository in "owner/repo" format
             head_sha: Commit SHA to checkout
             repo_url: Optional clone URL (defaults to https://github.com/{repo}.git)
+            base_sha: Optional base commit SHA. When given, it is fetched alongside
+                head_sha so `git diff base..head` has both ends locally.
 
         Returns:
             Path to the repository root
@@ -42,9 +45,11 @@ class RepoCache:
         if repo_url is None:
             repo_url = f"https://github.com/{repo}.git"
 
+        wanted = [sha for sha in (base_sha, head_sha) if sha]
+
         if repo_path.exists() and (repo_path / ".git").exists():
             self.logger.debug("Using cached repo: %s", repo_path)
-            self._fetch_and_checkout(repo_path, head_sha)
+            self._fetch_and_checkout(repo_path, head_sha, wanted)
         else:
             self.logger.info("Cloning repo to cache: %s -> %s", repo, repo_path)
             self._clone(repo_url, repo_path, head_sha)
@@ -68,10 +73,13 @@ class RepoCache:
         """Clone a repository and checkout the specified commit."""
         repo_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Full clone for maximum CC context
-        self.logger.debug("Cloning %s...", repo_url)
+        # Partial clone: full commit graph and trees (so `git diff base..head` and any
+        # other history walk works), but no file contents up front. Blobs are fetched
+        # lazily, on demand -- which for the two commits we actually diff is a handful
+        # of files instead of every version of every file ever committed.
+        self.logger.debug("Cloning %s (blobless)...", repo_url)
         subprocess.run(
-            ["git", "clone", repo_url, str(repo_path)],
+            ["git", "clone", "--filter=blob:none", repo_url, str(repo_path)],
             check=True,
             capture_output=True,
         )
@@ -79,17 +87,39 @@ class RepoCache:
         # Checkout the target commit
         self._checkout(repo_path, head_sha)
 
-    def _fetch_and_checkout(self, repo_path: Path, head_sha: str) -> None:
-        """Fetch latest and checkout the specified commit."""
-        self.logger.debug("Fetching updates for %s...", repo_path)
+    def _fetch_and_checkout(
+        self,
+        repo_path: Path,
+        head_sha: str,
+        wanted_shas: list[str] | None = None,
+    ) -> None:
+        """Fetch the commits we need and checkout the specified one.
 
-        # Fetch all refs
-        subprocess.run(
-            ["git", "fetch", "--all"],
+        Fetches only the SHAs this task diffs, rather than `--all` (every branch and
+        every tag on every remote) which costs real time per PR on large repos. Falls
+        back to a full fetch if the targeted one fails -- e.g. a force-pushed SHA the
+        remote will no longer serve directly.
+        """
+        shas = wanted_shas or [head_sha]
+        self.logger.debug("Fetching %s for %s...", ", ".join(s[:8] for s in shas), repo_path)
+
+        fetched = subprocess.run(
+            ["git", "fetch", "origin", *shas],
             cwd=str(repo_path),
-            check=True,
+            check=False,
             capture_output=True,
         )
+        if fetched.returncode != 0:
+            self.logger.debug(
+                "Targeted fetch failed (%s); falling back to full fetch",
+                fetched.stderr.decode().strip() if fetched.stderr else "unknown",
+            )
+            subprocess.run(
+                ["git", "fetch", "--all"],
+                cwd=str(repo_path),
+                check=True,
+                capture_output=True,
+            )
 
         # Try to checkout the commit
         self._checkout(repo_path, head_sha)

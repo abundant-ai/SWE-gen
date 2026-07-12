@@ -133,6 +133,10 @@ class FarmConfig:
         resume_from: Resume from date (ISO format or YYYY-MM-DD)
         dry_run: Only show what would run (no task generation)
         docker_prune_batch: Run docker cleanup after every N PRs (0 to disable)
+        build_cache_keep: Ceiling for the retained Docker build cache during cleanup
+            (any docker size string, e.g. "20GB"). Layers above this are evicted
+            least-recently-used first, so the base/runtime layers shared by every task
+            survive while per-task layers are reclaimed.
         skip_list: Path to file with task IDs to skip
         no_cache: Disable reusing cached Dockerfiles/test.sh
         require_minimum_difficulty: Require 3+ source files for task
@@ -160,6 +164,7 @@ class FarmConfig:
     resume_from: str | None = None
     dry_run: bool = False
     docker_prune_batch: int = 5
+    build_cache_keep: str = "20GB"
     skip_list: str | None = None
     no_cache: bool = False
     require_minimum_difficulty: bool = True
