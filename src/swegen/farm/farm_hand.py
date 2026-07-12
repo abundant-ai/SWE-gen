@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import time
 import traceback
@@ -160,6 +161,47 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
 
     message = (stderr or "Unknown error").replace("\n", " ")
     return "other", message
+
+
+# Exceptions name the PR they concern ("PR #9413: ...", "PR #9413 is too trivial: ..."),
+# and callers print the reason as "PR #N: {message}". Strip the self-prefix so the PR is
+# named once.
+_SELF_PREFIX_RE = re.compile(r"^PR #\d+\b(?:\s+is)?\s*:?\s*", re.IGNORECASE)
+
+# Friendly label per category, paired with the phrase that means the exception's message
+# already conveys it. Categories reached only via _classify_failure are absent: for those
+# the message is already the friendly string.
+CATEGORY_LABELS = {
+    "trivial": ("Trivial PR (skipped)", "trivial"),
+    "no_issue": ("No linked issue (skipped)", "linked issue"),
+    # Not "(NOP or Oracle)": this category also covers the offline-tests policy and the
+    # task-structure checks. The Harbor message names NOP/Oracle itself when that is the
+    # cause, and the label is skipped whenever the detail already says "validation".
+    "validation_failed": ("Validation failed", "validation"),
+    "already_exists": ("Task already exists (skipped)", "already exists"),
+}
+
+
+def _failure_message(category: str | None, error_msg: str) -> str:
+    """Render the human-facing reason for a failed PR.
+
+    Keeps the exception's detail ("Too many source files modified (14, max 10)"), which a
+    bare label drops, and prepends the label only when the detail does not already say it.
+    """
+    detail, stripped = _SELF_PREFIX_RE.subn("", (error_msg or "").replace("\n", " ").strip())
+    # Only re-capitalise what the strip decapitated ("PR #9413 is too trivial" ->
+    # "Too trivial"). Messages that start lowercase on their own may begin with a path.
+    if stripped and detail:
+        detail = detail[0].upper() + detail[1:]
+
+    label, spoken_for = CATEGORY_LABELS.get(category or "", (None, None))
+    if not label:
+        return detail or "Unknown error"
+    if not detail:
+        return label
+    if spoken_for in detail.lower():
+        return detail
+    return f"{label}: {detail}"
 
 
 def _print_success(
@@ -399,12 +441,11 @@ def _run_reversal_for_pr_impl(
         error_category = "already_exists"
         success = False
     except Exception as e:
-        # Other errors
+        # Unexpected error: no handler set a category, so derive one from the message.
         error_msg = f"{type(e).__name__}: {str(e)}"
         if config.verbose:
             console.print(f"[red]{traceback.format_exc()}[/red]")
-        # Classify the error
-        error_category, _ = _classify_failure(error_msg)
+        error_category, error_msg = _classify_failure(error_msg)
         success = False
 
     if success:
@@ -474,8 +515,12 @@ def _run_reversal_for_pr_impl(
             category=failure_category,
         )
 
-    # Pipeline failed
-    failure_category, failure_reason = _classify_failure(error_msg)
+    # Pipeline failed. Use the category the handler set; _classify_failure only sees the
+    # message text, and several of these (the file-count bounds, say) do not spell out
+    # which category they belong to. The category drives the inter-PR delay and the run
+    # summary's failure breakdown, so it has to be exact.
+    failure_category = error_category
+    failure_reason = _failure_message(error_category, error_msg)
 
     if failure_category == "publish_failed":
         # The task itself is valid - it passed every gate and only the push/PR failed.
