@@ -163,17 +163,14 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
     return "other", message
 
 
-# Friendly label per category, with the phrase that means the exception's own message
-# already says it. Typed exceptions carry the diagnostic detail ("Too many source files
-# modified (14, max 10)") that a bare label would throw away, so the label is only
-# prepended when the message does not already convey it -- otherwise it just stutters
-# ("Task already exists (skipped): Task already exists: ..."). Categories that arrive only
-# via _classify_failure are absent on purpose: their message *is* the friendly string.
-# Exceptions prefix themselves with the PR they concern ("PR #9413: ..." or
-# "PR #9413 is too trivial: ..."), and the callers print the reason as "PR #N: {message}".
-# Stripping the self-prefix is what removes the doubled "PR #9413: PR #9413:".
+# Exceptions name the PR they concern ("PR #9413: ...", "PR #9413 is too trivial: ..."),
+# and callers print the reason as "PR #N: {message}". Strip the self-prefix so the PR is
+# named once.
 _SELF_PREFIX_RE = re.compile(r"^PR #\d+\b(?:\s+is)?\s*:?\s*", re.IGNORECASE)
 
+# Friendly label per category, paired with the phrase that means the exception's message
+# already conveys it. Categories reached only via _classify_failure are absent: for those
+# the message is already the friendly string.
 CATEGORY_LABELS = {
     "trivial": ("Trivial PR (skipped)", "trivial"),
     "no_issue": ("No linked issue (skipped)", "linked issue"),
@@ -185,9 +182,8 @@ CATEGORY_LABELS = {
 def _failure_message(pr_number: int, category: str | None, error_msg: str) -> str:
     """Render the human-facing reason for a failed PR.
 
-    Strips any leading "PR #N: " the exception prefixed itself with: the callers print
-    this as "PR #N: {message}", which is where the doubled "PR #9413: PR #9413:" in the
-    farm log came from.
+    Keeps the exception's detail ("Too many source files modified (14, max 10)"), which a
+    bare label drops, and prepends the label only when the detail does not already say it.
     """
     detail = _SELF_PREFIX_RE.sub("", (error_msg or "").replace("\n", " ").strip())
     if detail:
@@ -440,7 +436,7 @@ def _run_reversal_for_pr_impl(
         error_category = "already_exists"
         success = False
     except Exception as e:
-        # Unexpected error: nothing set a category for us, so sniff the message.
+        # Unexpected error: no handler set a category, so derive one from the message.
         error_msg = f"{type(e).__name__}: {str(e)}"
         if config.verbose:
             console.print(f"[red]{traceback.format_exc()}[/red]")
@@ -514,11 +510,10 @@ def _run_reversal_for_pr_impl(
             category=failure_category,
         )
 
-    # Pipeline failed. Trust the category the handler above already established -- do not
-    # re-derive it by grepping the message. _classify_failure only recognises a trivial PR
-    # by the literal word "trivial", so a TrivialPRError raised for the file-count bounds
-    # ("Too many source files modified (14, max 10)") was landing in "other": it delayed
-    # 60s before the next PR and was counted under Other Errors in the summary.
+    # Pipeline failed. Use the category the handler set; _classify_failure only sees the
+    # message text, and several of these (the file-count bounds, say) do not spell out
+    # which category they belong to. The category drives the inter-PR delay and the run
+    # summary's failure breakdown, so it has to be exact.
     failure_category = error_category
     failure_reason = _failure_message(pr.number, error_category, error_msg)
 
