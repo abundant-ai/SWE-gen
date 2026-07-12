@@ -75,6 +75,157 @@ Key options:
 - `--no-validate`: Skip Harbor validation
 - `--skip-list PATH`: Path to file with task IDs to skip (one per line)
 
+### Publishing tasks (ephemeral sandboxes)
+
+Both `create` and `farm` can publish each validated task to a **dataset repo** as its own
+branch + PR, immediately. This is what makes farming safe on ephemeral sandboxes like
+Daytona: nothing of value lives only on local disk.
+
+```bash
+export GIT_TOKEN=<token>   # contents:write + pull_requests:write on the dataset repo
+swegen farm fastapi/fastapi --publish-repo abundant-ai/ots-tasks
+```
+
+Per validated task: a branch `task/<task_id>` is cut fresh from `main`, the task directory
+is copied to `tasks/<task_id>`, committed as `Add task: <task_id>`, pushed, and opened as a
+PR whose body links back to the source PR.
+
+Farm state is committed to a **per-source-repo branch** `farm-state/<owner>__<repo>` on the
+same dataset repo after every PR, so a fresh sandbox resumes exactly where the dead one
+stopped rather than re-burning Claude Code and OpenAI calls on PRs it already rejected.
+Per-repo branch names mean N containers farming N repos never contend.
+
+Key options:
+- `--publish-repo`: Dataset repo (`owner/repo`). Its presence enables publishing.
+- `--publish-path`: Directory within the dataset repo (default: `tasks`)
+- `--publish-base`: Branch task branches are cut from and PRs target (default: `main`)
+- `--publish-branch-prefix`: Default `task/`
+- `--publish-state-branch-prefix`: Default `farm-state/`
+- `--publish-state-path`: Default `state`
+- `--publish-clone-dir`: Default `<state-dir>/publish/<dataset_slug>/<source_slug>`
+- `--publish-dry-run`: Clone, branch and commit locally; never push or open a PR
+- `--cleanup-local`: Delete each local task copy once it is published to the dataset repo
+
+**Contract with the dataset repo:** task PRs touch only `tasks/<task_id>/`, so PRs from
+different source repos merge into `main` without conflict. Do **not** add a top-level
+manifest or a README table of tasks — it would textually conflict on every merge. Generate
+any such index in CI from the directory listing instead.
+
+Tasks are staged with `git add --force`. SWE-gen's own `.gitignore` excludes `tasks/`
+(it is the local output directory), and a dataset repo created from this template inherits
+that rule — without `--force` the publish would fail on `git add` with "paths are ignored".
+Only the one `tasks/<task_id>/` pathspec is ever staged.
+
+**Publish failures stop the run — on the first one.** A bad token fails at preflight, before
+any PR is processed. Preflight rejects only an *explicit* `push: false` from `GET /repos`;
+fine-grained and app tokens may omit `permissions` entirely, so an absent field warns and
+proceeds rather than blocking a token whose pushes would have succeeded.
+
+Once farming is underway, any publish failure aborts: a rejected `git push` cannot be told
+apart from a broken remote, and the next PR would spend a full Claude Code session only to
+hit the same wall. A failed **state push** aborts for the same reason, including the final
+push in `_finalize()` (which sets a nonzero exit code). Both are checked together, so an
+abort that happens to hit both reports both — the panel never claims farm state was preserved
+when it was not. Non-publish failures (trivial, no-issue, validation) never abort.
+
+A **Claude rate/usage limit** also aborts (category `rate_limited`). Claude Code failures
+whose error matches a rate-limit signature — notably `rate_limit_event`, the SDK message
+that `claude-agent-sdk` fails to parse — are raised as `ClaudeRateLimitError` rather than
+swallowed into a validation failure. Every task draws from the same limit, so continuing is
+pointless until the token/account is swapped; the run stops and the source PR is left
+unprocessed so a re-run with a fresh token farms it. The abort panel says to swap the token.
+The PR is recorded in `claude_rate_limited_prs` (not merely skipped) and exempted from the
+resume-time skip, exactly like `publish_failed_prs` — otherwise a PR sharing the resume
+cursor's exact `created_at` would be dropped by the fetcher's `>=` and never retried.
+
+Tasks that fail to publish are **kept on disk** (unlike other failures, which are cleaned
+up): they passed every validation gate, so they are valid work that can be pushed by hand or
+by a re-run.
+
+The source PR is **not marked processed** on a publish failure, so a re-run retries it. This
+is the recovery path for a push that succeeds and a `create_pr` that then fails: the retry
+refreshes the branch this task left behind and opens the PR that never got created. Marking
+it processed would strand a branch on the remote with no PR and no way to reach it again.
+`StreamingPRFetcher` also exempts these PRs from the resume-time skip, so one sharing the
+cursor's timestamp is retried rather than stranded.
+
+That retry is **publish-only**: the farm republishes the task already on disk rather than
+regenerating it. Regeneration runs with `force=True`, which `rmtree`s the task directory
+before rebuilding — throwing away a validated task to redo an hour of Claude Code, and losing
+it outright if the rebuild then fails. If the task is missing (a fresh sandbox), the retry
+falls back to full generation.
+
+When a state push fails, the local mirror has already been written, so nothing is lost from
+disk — but the durable cursor is behind, and the abort panel says so and names the mirror.
+
+If a state push is rejected because the remote moved, the loser **merges** rather than
+overwrites: `StreamState.merge_from` unions the processed-PR sets and keeps the newer cursor
+(newer skips less; `processed_prs` is the authoritative skip list). Blindly recommitting an
+in-memory snapshot would erase whatever the other writer just published. One container per
+repo means this should never trigger, but losing a durable cursor is not worth the gamble.
+
+Counters (`successful` / `failed` / `total_processed`) are **derived** from the recorded sets
+on every mutation, never incremented in place. A PR can move between categories — a publish
+failure that later succeeds on retry — and a merge unions two states; incremental counting
+drifts in both cases.
+
+`swegen create` publishes **before** writing its `create.jsonl` dedupe record, and the record
+carries a `published` flag reflecting what actually reached the dataset repo — `false` under
+`--publish-dry-run`, and `false` when the publish raised, in which case the task is *still*
+recorded so a rerun's dedupe finds it and republishes rather than hitting `FileExistsError`
+and needing `--force`, which would delete it. Records written before this flag existed are
+read as published.
+
+A **dedupe hit publishes the existing task** rather than returning early. A task on disk is
+not proof it reached the dataset repo — it may predate publishing, or belong to a run whose
+push failed. Returning silently would let the farm mark the source PR processed with no PR
+ever opened. Publishing is idempotent, so a task already published just yields its PR URL.
+
+An **already-open PR refreshes its branch**; it short-circuits only PR *creation*. The task
+may have been regenerated (`--force`, `--reset`, a rerun after a failed `create.jsonl` write),
+and returning early would leave the branch and PR on older content while the pipeline reported
+success. If the task is already merged into the base branch byte-for-byte there is nothing to
+commit, and publish reports success without pushing.
+
+`GitStateStore.load` merges the **local mirror** with the state branch, and the side with the
+newer `last_updated` is the merge receiver (ties favour the mirror). A failed push leaves the
+mirror ahead of the branch; another sandbox can equally leave the branch ahead of a mirror
+sitting on a persistent volume. Reading only one side would forget the other's PRs and drop
+`publish_failed_prs`, which the fetcher needs to know a PR still awaits its PR. Sets union
+whichever way the merge runs, so no PR is ever lost — the receiver only decides per-PR value
+collisions (`task_pr_urls`, `successful_prs`, `other_failed_prs`).
+
+**Dry runs record nothing.** `--dry-run` generates no task, and `--publish-dry-run` pushes
+nothing, so neither consumes a source PR — a later real run must still farm it. The
+prune/progress cadences are driven by a per-run `prs_seen` counter rather than
+`state.total_processed`, which a dry run leaves at zero.
+
+**`--cleanup-local`** deletes each local task directory once it is durably published (a real
+branch/PR on the dataset repo), to free disk on constrained sandboxes. It never fires on a
+dry run, a publish failure, or when publishing is disabled — the dataset repo must be the
+surviving copy. Cleanup is the last step, after the state record and the task-reference save;
+the farm suppresses `run_reversal`'s own cleanup (`cleanup_local=False` in the generated
+config) so the task dir still exists for the success gate and the reference save, then cleans
+up itself. A genuinely missing task dir (a pipeline bug, not a cleanup) still fails the gate.
+
+**A task that exists on disk but not in the dataset repo is republished, not consumed.** If a
+farm run hits `FileExistsError` (a validated task dir survives but `create.jsonl` can't
+dedupe it — e.g. a `--publish-dry-run` built it, or `.swegen` was cleared) and publishing is
+on, the farm republishes the existing task via `publish_existing_task` rather than marking the
+PR `already_exists` and moving on unpublished. If that republish fails it becomes
+`publish_failed` (task preserved), symmetric with the publish-only retry.
+
+`--reset` with `--publish-repo` overwrites the durable state branch, not just a local file —
+every PR recorded there gets regenerated. The farm prints a warning; the behavior is intended.
+The overwrite is honored even if the first state push is rejected by a concurrent writer: a
+reset run force-pushes rather than merging, or the merge would union the old PRs back in and
+silently undo the reset. Only the first save forces; later saves in the same run merge, so a
+legitimate concurrent writer is not clobbered on every PR.
+
+`GIT_TOKEN` is separate from `GITHUB_TOKEN` (read-only, used to fetch source PRs) so a farm
+run can read from anywhere while only ever writing to one repo. It falls back to
+`GITHUB_TOKEN` if unset.
+
 ### `swegen validate`
 Validate existing Harbor tasks.
 
@@ -143,6 +294,15 @@ src/swegen/
 │   ├── farm_hand.py        # Per-PR processing logic
 │   ├── fetcher.py          # StreamingPRFetcher - GitHub PR streaming
 │   └── state.py            # StreamState - persistence for resumability
+├── publish/                # Publish tasks + farm state to a dataset repo
+│   ├── base.py             # TaskSink / StateStore protocols, PublishContext/Result
+│   ├── git_ops.py          # GitRepo - subprocess git wrapper (clone, branch, worktree)
+│   ├── gh_api.py           # GitHubAPI - REST client with bounded retries
+│   ├── github_pr.py        # GitHubPRSink - branch + PR per task
+│   ├── git_state.py        # GitStateStore - state on farm-state/<slug> branch
+│   ├── local_state.py      # LocalStateStore - state on local disk (default)
+│   ├── null.py             # NullSink - no publishing (default)
+│   └── body.py             # PR title/body/commit message templates
 └── tools/                  # Utility tools
     ├── validate.py         # Harbor NOP/Oracle validation
     ├── harbor_runner.py    # Harbor CLI wrapper
@@ -316,6 +476,7 @@ All configuration is done via dataclasses in `config.py`:
 - **CreateConfig** - Single PR → task conversion
 - **FarmConfig** - Continuous PR farming
 - **ValidateConfig** - Task validation
+- **PublishConfig** - Dataset repo, token, branch/path naming (None disables publishing)
 
 Key defaults:
 - Claude Code always used for task completion
@@ -341,8 +502,22 @@ State is persisted in `.swegen/`:
 ├── repos/              # Cached git repos
 ├── harbor-jobs/        # Harbor job artifacts
 ├── logs/               # Generation logs
+├── publish/            # Clone of the dataset repo (when --publish-repo is set)
+│   └── <dataset_slug>/<source_slug>/       # main tree: task branches
+│   └── <dataset_slug>/<source_slug>-state/ # linked worktree: state branch
 └── task_references.json    # Successful task references
 ```
+
+All of `.swegen/` is lost when an ephemeral sandbox dies. With `--publish-repo`, tasks and
+`StreamState` are mirrored to the dataset repo, which is the durable copy.
+
+The task branch and the state branch share one clone but live in **separate working trees**
+(`git worktree`), so the state push that follows every PR never disturbs the task branch
+being built in the main tree.
+
+Task publishing is serial-only: `StreamFarmer` processes one PR at a time, so a single
+working tree with `checkout -B` per task is safe. Concurrent generation within one process
+would need a worktree per task.
 
 ---
 
@@ -375,12 +550,16 @@ Common error types:
 - **ValidationError** - Harbor NOP/Oracle validation failed
 - **FileExistsError** - Task already exists (use `--force`)
 
+- **PublishError** - A task could not be published (push/PR failed, or a recorded task is missing from disk); farming stops
+- **PublishAuthError** - Publish token missing, invalid, or lacking write access; raised at preflight, never retried (subclass of PublishError)
+
 Farm mode classifies failures for reporting:
 - Trivial PR (skipped)
 - No linked issue (skipped)
 - Validation failed
 - API rate limit exceeded
 - Git checkout failed
+- Publish failed
 
 ---
 

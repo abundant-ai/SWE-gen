@@ -18,6 +18,31 @@ from swegen.create.claude_code_utils import Colors, print_sdk_message
 from swegen.tools.harbor_runner import parse_harbor_outcome
 
 
+class ClaudeRateLimitError(RuntimeError):
+    """Claude Code hit an Anthropic rate / usage limit.
+
+    Fatal for farming: every subsequent task draws from the same limit and fails the same
+    way until the token/account is swapped, so there is no point spending a Claude Code
+    session per PR. The farm stops instead. The task's source PR is left unprocessed so it
+    is farmed on a re-run with a fresh token.
+    """
+
+
+# Substrings (lowercased) that mark a Claude Code failure as a rate/usage limit rather than
+# a task-specific problem. `rate_limit_event` is the SDK message-parse crash observed in the
+# field (claude-agent-sdk does not handle that stream event); the others cover a 429 or usage
+# cap surfaced through the SDK.
+_RATE_LIMIT_MARKERS = ("rate_limit_event", "rate limit", "rate_limited", "usage limit")
+
+
+def is_rate_limit_failure(error_message: str | None) -> bool:
+    """True if a Claude Code error message indicates an Anthropic rate/usage limit."""
+    if not error_message:
+        return False
+    lowered = error_message.lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
 @dataclass
 class ClaudeCodeResult:
     """Result of the CC session."""

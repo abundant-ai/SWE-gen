@@ -3,7 +3,7 @@ from __future__ import annotations
 import shutil
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,12 +12,52 @@ from rich.panel import Panel
 
 from swegen.config import CreateConfig, FarmConfig
 from swegen.create import MissingIssueError, TrivialPRError, ValidationError
-from swegen.create.create import run_reversal
+from swegen.create.claude_code_runner import ClaudeRateLimitError
+from swegen.create.create import publish_existing_task, run_reversal
 from swegen.create.task_reference import TaskReferenceStore
+from swegen.publish import PublishError
 
 
 def _now_utc() -> datetime:
     return datetime.now(UTC)
+
+
+def _publish_for_generation(config: FarmConfig):
+    """Publish config for a farm-driven run_reversal, with local cleanup suppressed.
+
+    The farm cleans up itself, after its success gate passes. Letting run_reversal delete
+    the task dir first would break that gate (a missing dir reads as a pipeline failure).
+    run_reversal still saves the task reference (before publish); the farm's own cleanup
+    clears that reference when it deletes the task, so nothing dangles.
+    """
+    if config.publish is None:
+        return None
+    return replace(config.publish, cleanup_local=False)
+
+
+def _cleanup_local_if_published(
+    config: FarmConfig, task_id: str, tasks_root: Path, console: Console
+) -> None:
+    """Delete the local task copy when --cleanup-local is set and publishing is real.
+
+    Called only on a confirmed publish (a real branch/PR on the dataset repo), so the
+    remote is the surviving copy. Never runs under dry-run - nothing was published.
+    """
+    if config.publish is None or not config.publish.cleanup_local or config.publish.dry_run:
+        return
+    task_dir = tasks_root / task_id
+    try:
+        if task_dir.exists():
+            shutil.rmtree(task_dir)
+            console.print(f"[dim]Removed local task copy {task_dir} (published)[/dim]")
+    except OSError as e:
+        console.print(f"[yellow]Could not remove local task copy {task_dir}: {e}[/yellow]")
+
+    # run_reversal saved a task reference before publishing (it does not see the farm's
+    # cleanup intent, since the generation config suppresses cleanup_local). Drop it now,
+    # or it would point Claude Code at the directory we just deleted.
+    reference_file = Path(config.state_dir) / "task_references.json"
+    TaskReferenceStore(reference_file=reference_file).clear(config.repo, task_id)
 
 
 def _slug(repo: str) -> str:
@@ -57,6 +97,7 @@ class TaskResult:
     duration_seconds: float
     timestamp: str
     category: str = None  # Category for detailed tracking
+    pr_url: str = None  # URL of the published task PR, if publishing is enabled
 
 
 def _cleanup_task(task_id: str, tasks_root: Path, console: Console) -> None:
@@ -75,7 +116,7 @@ def _cleanup_task(task_id: str, tasks_root: Path, console: Console) -> None:
 
 def _classify_failure(stderr: str) -> tuple[str, str]:
     """Classify failure reason and return (category, message).
-    
+
     Categories:
     - trivial: Trivial PR (too small/simple)
     - no_issue: No linked issue
@@ -86,9 +127,16 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
     - quota_exceeded: OpenAI quota exceeded
     - timeout: Command timeout
     - git_error: Git checkout/commit errors
+    - publish_failed: Task built but could not be pushed/PR'd
     - other: Unknown/other errors
     """
     lowered = stderr.lower()
+    # Checked first: these wrap git/HTTP/SDK output that would otherwise match the
+    # "timeout" or "git" heuristics below.
+    if "claude rate limit" in lowered or "rate_limit_event" in lowered:
+        return "rate_limited", (stderr or "Claude rate limit").replace("\n", " ")
+    if "publish failed" in lowered:
+        return "publish_failed", (stderr or "Publish failed").replace("\n", " ")
     if "trivial" in stderr:
         return "trivial", "Trivial PR (skipped)"
     if "no linked issue" in lowered or "missingissueerror" in lowered:
@@ -109,7 +157,7 @@ def _classify_failure(stderr: str) -> tuple[str, str]:
         return "git_error", "Git commit not found (may be force-pushed or deleted)"
     if "git checkout" in lowered:
         return "git_error", "Git checkout failed (repo cache may be corrupted)"
-    
+
     message = (stderr or "Unknown error").replace("\n", " ")
     return "other", message
 
@@ -119,10 +167,14 @@ def _print_success(
     pr: PRCandidate,
     task_id: str,
     harbor_dir: Path,
+    pr_url: str | None = None,
 ) -> None:
+    body = f"🎉 Successfully generated task\n[bold]{task_id}[/bold]\nHarbor: {harbor_dir}"
+    if pr_url:
+        body += f"\nPublished: {pr_url}"
     console.print(
         Panel.fit(
-            f"🎉 Successfully generated task\n[bold]{task_id}[/bold]\nHarbor: {harbor_dir}",
+            body,
             title=f"PR #{pr.number}",
             border_style="green",
         )
@@ -146,11 +198,60 @@ def _gate_task(
     return True, f"Task generated successfully at {task_dir}"
 
 
+def _retry_publish_only(
+    pr: PRCandidate,
+    config: FarmConfig,
+    console: Console,
+    task_id: str,
+    harbor_dir: Path,
+    start: float,
+) -> TaskResult:
+    """Republish a task left on disk by an earlier publish failure.
+
+    Regenerating would call run_reversal with force=True, which rmtree's the task
+    directory before rebuilding it - destroying a validated task to redo an hour of
+    Claude Code, and losing it outright if the rebuild then fails. The task already
+    passed every gate; only the push did not.
+    """
+    console.print(
+        f"[cyan]PR #{pr.number}: task {task_id} was validated but never published; "
+        f"retrying publish only (no regeneration)[/cyan]"
+    )
+    create_config = CreateConfig(
+        repo=config.repo,
+        pr=pr.number,
+        output=config.output,
+        state_dir=config.state_dir,
+        verbose=config.verbose,
+        environment=config.environment,
+        publish=_publish_for_generation(config),
+    )
+    record = {"task_id": task_id, "harbor": str(harbor_dir)}
+    result = publish_existing_task(console, create_config, config.repo, pr.number, record)
+    pr_url = result.pr_url if result else None
+
+    _print_success(console, pr, task_id, harbor_dir, pr_url)
+    if result is not None and result.published:
+        _cleanup_local_if_published(config, task_id, harbor_dir.parent, console)
+    return TaskResult(
+        repo=config.repo,
+        pr_number=pr.number,
+        task_id=task_id,
+        status="success",
+        message=f"Republished existing task at {harbor_dir}",
+        duration_seconds=round(time.time() - start, 2),
+        timestamp=_now_utc().isoformat(),
+        category=None,
+        pr_url=pr_url,
+    )
+
+
 def _run_reversal_for_pr(
     pr: PRCandidate,
     config: FarmConfig,
     tasks_root: Path,
     console: Console,
+    publish_only: bool = False,
 ) -> TaskResult:
     start = time.time()
     task_id = _task_id(config.repo, pr.number)
@@ -158,8 +259,31 @@ def _run_reversal_for_pr(
 
     # Wrap everything in try-except to catch unexpected errors
     try:
+        # A PR pending publication already has a validated task on disk. Publish it rather
+        # than regenerating, which would delete it.
+        if publish_only and config.publish is not None and harbor_dir.exists():
+            return _retry_publish_only(pr, config, console, task_id, harbor_dir, start)
+
         return _run_reversal_for_pr_impl(
             pr, config, tasks_root, console, task_id, harbor_dir, start
+        )
+    except PublishError as e:
+        # From the publish-only retry above. Never clean up: the task is validated and
+        # only publishing failed, so it must survive for the next attempt.
+        error_msg = f"Publish failed: {e}"
+        console.print(f"[red]✗ PR #{pr.number}: {error_msg}[/red]")
+        console.print(
+            f"[yellow]Keeping task directory {harbor_dir} (validated but unpublished)[/yellow]"
+        )
+        return TaskResult(
+            repo=config.repo,
+            pr_number=pr.number,
+            task_id=task_id,
+            status="failed",
+            message=error_msg,
+            duration_seconds=round(time.time() - start, 2),
+            timestamp=_now_utc().isoformat(),
+            category="publish_failed",
         )
     except Exception as e:
         # Catch any unexpected exception and return proper error
@@ -219,17 +343,33 @@ def _run_reversal_for_pr_impl(
         require_issue=config.require_issue,
         environment=config.environment,
         enforce_offline_tests=config.enforce_offline_tests,
+        publish=_publish_for_generation(config),
     )
 
     # Capture any errors from the pipeline
     success = False
     error_msg = ""
     error_category = None
+    pr_url: str | None = None
 
     try:
         # Call the pipeline directly instead of using subprocess
-        run_reversal(create_config)
+        pr_url = run_reversal(create_config)
         success = True
+    except ClaudeRateLimitError as e:
+        # Anthropic rate/usage limit. Not this PR's fault and it will hit every following
+        # task the same way until the token is swapped, so the farmer stops the run and the
+        # PR is left unprocessed for a re-run with a fresh token.
+        error_msg = f"Claude rate limit: {e}"
+        error_category = "rate_limited"
+        success = False
+    except PublishError as e:
+        # Task was built and validated but never reached the dataset repo. The farmer
+        # stops the run on this category rather than burning a Claude Code session on
+        # the next PR just to fail at the same wall.
+        error_msg = f"Publish failed: {e}"
+        error_category = "publish_failed"
+        success = False
     except TrivialPRError as e:
         # Trivial PR - not an error, just skip it
         error_msg = str(e)
@@ -246,7 +386,15 @@ def _run_reversal_for_pr_impl(
         error_category = "validation_failed"
         success = False
     except FileExistsError as e:
-        # Task already exists - skip it
+        # A task directory already exists and run_reversal's create.jsonl dedupe did not
+        # republish it - typically because create.jsonl was unavailable (a separate
+        # --state-dir, a cleared .swegen, or a --publish-dry-run run on another disk) while
+        # the validated task survived. With publishing on and the task on disk, republish
+        # it rather than consuming the PR unpublished, symmetric with the publish_failed
+        # retry. If republishing fails, _retry_publish_only raises PublishError, which the
+        # outer handler classifies as publish_failed and the task is preserved.
+        if config.publish is not None and harbor_dir.exists():
+            return _retry_publish_only(pr, config, console, task_id, harbor_dir, start)
         error_msg = f"Task already exists: {str(e)}"
         error_category = "already_exists"
         success = False
@@ -287,18 +435,16 @@ def _run_reversal_for_pr_impl(
         duration = time.time() - start
         gate_ok, gate_msg = _gate_task(task_id, tasks_root)
         if gate_ok:
-            _print_success(console, pr, task_id, harbor_dir)
+            _print_success(console, pr, task_id, harbor_dir, pr_url)
 
-            # Save task reference for future PRs
-            try:
-                reference_store = TaskReferenceStore()
-                reference_store.save(
-                    repo=config.repo,
-                    task_id=task_id,
-                    pr_number=pr.number,
-                )
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not save task reference: {e}[/yellow]")
+            # The task reference is saved inside run_reversal, at validation time and before
+            # publish, so it also covers a task that fails to publish or is republished on
+            # retry (which never calls run_reversal). Nothing to save here.
+
+            # Free disk on constrained sandboxes now the task is on the dataset repo.
+            # Self-guards on publish enabled + not dry-run. Under --publish-dry-run this
+            # no-ops and the PR is left unprocessed for a real run.
+            _cleanup_local_if_published(config, task_id, tasks_root, console)
 
             return TaskResult(
                 repo=config.repo,
@@ -309,6 +455,7 @@ def _run_reversal_for_pr_impl(
                 duration_seconds=round(duration, 2),
                 timestamp=_now_utc().isoformat(),
                 category=None,
+                pr_url=pr_url,
             )
 
         # Gate failed
@@ -329,7 +476,17 @@ def _run_reversal_for_pr_impl(
 
     # Pipeline failed
     failure_category, failure_reason = _classify_failure(error_msg)
-    _cleanup_task(task_id, tasks_root, console)
+
+    if failure_category == "publish_failed":
+        # The task itself is valid - it passed every gate and only the push/PR failed.
+        # Keep it on disk so it can be published by hand or by a re-run.
+        console.print(
+            f"[yellow]Keeping task directory {tasks_root / task_id} "
+            f"(validated but unpublished)[/yellow]"
+        )
+    else:
+        _cleanup_task(task_id, tasks_root, console)
+
     console.print(f"[red]✗ PR #{pr.number}: {failure_reason}[/red]")
     return TaskResult(
         repo=config.repo,

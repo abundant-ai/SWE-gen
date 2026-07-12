@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from importlib.metadata import PackageNotFoundError as _PkgNotFound
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
@@ -9,18 +10,66 @@ from dotenv import load_dotenv
 from harbor.models.environment_type import EnvironmentType
 from rich.console import Console
 
-from swegen.config import CreateConfig, FarmConfig
+from swegen.config import CreateConfig, FarmConfig, PublishConfig
 from swegen.create import MissingIssueError, TrivialPRError
 from swegen.create.create import run_reversal
 from swegen.farm import StreamFarmer
 from swegen.analyze import AnalyzeArgs, run_analyze
 from swegen.analyze.classifier import VERDICT_MODEL
+from swegen.create.claude_code_runner import ClaudeRateLimitError
+from swegen.publish import PublishError
 from swegen.tools.validate import ValidateArgs, run_validate
 from swegen.tools.validate_utils import ValidationError
 
 load_dotenv()
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Task generation CLI")
+
+DEFAULT_AUTHOR_NAME = "aman-abundant"
+DEFAULT_AUTHOR_EMAIL = "aman@abundant.systems"
+
+
+def _build_publish_config(
+    publish_repo: str | None,
+    publish_path: str,
+    publish_base: str,
+    publish_branch_prefix: str,
+    publish_state_branch_prefix: str,
+    publish_state_path: str,
+    publish_clone_dir: Path | None,
+    publish_dry_run: bool,
+    publish_cleanup_local: bool = False,
+) -> PublishConfig | None:
+    """Build a PublishConfig from CLI options, or None when publishing is off.
+
+    Publishing is enabled by the presence of --publish-repo. The token comes from
+    GIT_TOKEN, falling back to GITHUB_TOKEN, and is deliberately separate from the
+    read-only token used to fetch source PRs.
+    """
+    if not publish_repo:
+        return None
+
+    token = os.environ.get("GIT_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise typer.BadParameter(
+            "--publish-repo requires GIT_TOKEN (or GITHUB_TOKEN) in the environment. "
+            "It needs contents:write and pull_requests:write on the dataset repo."
+        )
+
+    return PublishConfig(
+        repo=publish_repo,
+        token=token,
+        tasks_path=publish_path,
+        base_branch=publish_base,
+        branch_prefix=publish_branch_prefix,
+        state_branch_prefix=publish_state_branch_prefix,
+        state_path=publish_state_path,
+        clone_dir=publish_clone_dir,
+        dry_run=publish_dry_run,
+        cleanup_local=publish_cleanup_local,
+        author_name=os.environ.get("GIT_AUTHOR_NAME", DEFAULT_AUTHOR_NAME),
+        author_email=os.environ.get("GIT_AUTHOR_EMAIL", DEFAULT_AUTHOR_EMAIL),
+    )
 
 
 @app.callback(invoke_without_command=True)
@@ -106,6 +155,49 @@ def create_cmd(
         help="Environment type for Harbor runs (docker|daytona|e2b|modal|runloop|gke)",
         show_default=True,
     ),
+    publish_repo: str
+    | None = typer.Option(
+        None,
+        "--publish-repo",
+        help="Dataset repo (owner/repo) to publish the task to as a PR. Requires GIT_TOKEN. "
+        "Omit to keep tasks local.",
+    ),
+    publish_path: str = typer.Option(
+        "tasks", "--publish-path", help="Directory within the dataset repo", show_default=True
+    ),
+    publish_base: str = typer.Option(
+        "main", "--publish-base", help="Branch task branches are cut from", show_default=True
+    ),
+    publish_branch_prefix: str = typer.Option(
+        "task/", "--publish-branch-prefix", help="Prefix for per-task branches", show_default=True
+    ),
+    publish_state_branch_prefix: str = typer.Option(
+        "farm-state/",
+        "--publish-state-branch-prefix",
+        help="Prefix for the per-source-repo state branch",
+        show_default=True,
+    ),
+    publish_state_path: str = typer.Option(
+        "state", "--publish-state-path", help="Directory on the state branch", show_default=True
+    ),
+    publish_clone_dir: Path
+    | None = typer.Option(
+        None,
+        "--publish-clone-dir",
+        help="Where to clone the dataset repo "
+        "(default: <state-dir>/publish/<dataset_slug>/<source_slug>)",
+    ),
+    publish_dry_run: bool = typer.Option(
+        False,
+        "--publish-dry-run",
+        help="Clone, branch and commit locally but never push or open a PR",
+    ),
+    publish_cleanup_local: bool = typer.Option(
+        False,
+        "--cleanup-local",
+        help="Delete the local task copy once it is published to the dataset repo "
+        "(frees disk on constrained sandboxes; never deletes an unpublished task)",
+    ),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Increase output verbosity"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Reduce output verbosity"),
 ) -> None:
@@ -126,12 +218,30 @@ def create_cmd(
         environment=EnvironmentType(environment),
         generate_name=generate_name,
         enforce_offline_tests=enforce_offline_tests,
+        publish=_build_publish_config(
+            publish_repo,
+            publish_path,
+            publish_base,
+            publish_branch_prefix,
+            publish_state_branch_prefix,
+            publish_state_path,
+            publish_clone_dir,
+            publish_dry_run,
+            publish_cleanup_local,
+        ),
         verbose=verbose,
         quiet=quiet,
     )
     try:
         run_reversal(config)
-    except (TrivialPRError, MissingIssueError, ValidationError, FileExistsError) as err:
+    except (
+        TrivialPRError,
+        MissingIssueError,
+        ValidationError,
+        FileExistsError,
+        PublishError,
+        ClaudeRateLimitError,
+    ) as err:
         # These exceptions have already displayed user-friendly messages
         # Exit with error code but don't show traceback
         raise SystemExit(1) from err
@@ -415,11 +525,58 @@ def farm(
         "[environment].network_mode=no-network in task.toml (internet only during Docker build); "
         "--allow-test-network to disable",
     ),
+    publish_repo: str
+    | None = typer.Option(
+        None,
+        "--publish-repo",
+        help="Dataset repo (owner/repo) to publish each task to as a PR, and to persist farm "
+        "state to. Requires GIT_TOKEN. Omit to keep tasks and state local.",
+    ),
+    publish_path: str = typer.Option(
+        "tasks", "--publish-path", help="Directory within the dataset repo", show_default=True
+    ),
+    publish_base: str = typer.Option(
+        "main", "--publish-base", help="Branch task branches are cut from", show_default=True
+    ),
+    publish_branch_prefix: str = typer.Option(
+        "task/", "--publish-branch-prefix", help="Prefix for per-task branches", show_default=True
+    ),
+    publish_state_branch_prefix: str = typer.Option(
+        "farm-state/",
+        "--publish-state-branch-prefix",
+        help="Prefix for the per-source-repo state branch",
+        show_default=True,
+    ),
+    publish_state_path: str = typer.Option(
+        "state", "--publish-state-path", help="Directory on the state branch", show_default=True
+    ),
+    publish_clone_dir: Path
+    | None = typer.Option(
+        None,
+        "--publish-clone-dir",
+        help="Where to clone the dataset repo "
+        "(default: <state-dir>/publish/<dataset_slug>/<source_slug>)",
+    ),
+    publish_dry_run: bool = typer.Option(
+        False,
+        "--publish-dry-run",
+        help="Clone, branch and commit locally but never push or open a PR",
+    ),
+    publish_cleanup_local: bool = typer.Option(
+        False,
+        "--cleanup-local",
+        help="Delete the local task copy once it is published to the dataset repo "
+        "(frees disk on constrained sandboxes; never deletes an unpublished task)",
+    ),
 ) -> None:
     """
     Continuously process merged GitHub PRs and convert them to Harbor tasks.
     Streams PRs page-by-page, processes them immediately, and maintains state for resumable operation.
     Uses a language-agnostic pipeline that works for any repository.
+
+    With --publish-repo, each validated task is pushed to its own branch and opened as a
+    PR immediately, and farm state is committed to a per-repo state branch - so an
+    ephemeral sandbox (e.g. Daytona) can die without losing tasks or the resume cursor.
     """
     config = FarmConfig(
         repo=repo,
@@ -445,9 +602,26 @@ def farm(
         require_issue=require_issue,
         validate=validate,
         enforce_offline_tests=enforce_offline_tests,
+        publish=_build_publish_config(
+            publish_repo,
+            publish_path,
+            publish_base,
+            publish_branch_prefix,
+            publish_state_branch_prefix,
+            publish_state_path,
+            publish_clone_dir,
+            publish_dry_run,
+            publish_cleanup_local,
+        ),
     )
 
     console = Console()
-    farmer = StreamFarmer(config.repo, config, console)
+    try:
+        # Preflights the publish target, so a bad token fails here rather than after the
+        # first hour-long Claude Code session.
+        farmer = StreamFarmer(config.repo, config, console)
+    except PublishError as err:
+        console.print(f"[red]Cannot start farming: {err}[/red]")
+        raise SystemExit(1) from err
     exit_code = farmer.run()
     raise typer.Exit(code=exit_code)

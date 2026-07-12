@@ -16,6 +16,7 @@ from rich.table import Table
 from rich.text import Text
 
 from swegen.config import FarmConfig
+from swegen.publish import PublishError, build_state_store, build_task_sink
 
 from .farm_hand import (
     PRCandidate,
@@ -97,17 +98,40 @@ class StreamFarmer:
         self.config = config
         self.console = console
         self.tasks_root = config.output
-        self.tasks_root.mkdir(exist_ok=True)
+        self.tasks_root.mkdir(parents=True, exist_ok=True)
 
-        # State file path
+        # State file path (also the local mirror when publishing)
         self.state_file = config.state_dir / "stream_farm" / f"{_slug(repo)}.json"
+
+        # Preflight the sink before any PR is processed: a bad token must fail in
+        # seconds, not after the first hour-long Claude Code session.
+        self.sink = build_task_sink(config.publish, repo, state_dir=config.state_dir)
+        if config.publish is not None:
+            self.console.print(
+                f"[cyan]Publishing tasks to {config.publish.repo} "
+                f"(base: {config.publish.base_branch})[/cyan]"
+            )
+            self.sink.preflight()
+
+        self.state_store = build_state_store(
+            config.publish, repo, self.state_file, state_dir=config.state_dir, reset=config.reset
+        )
 
         # Load or create state
         if config.reset:
             self.state = StreamState(repo=repo)
             self.console.print("[yellow]State reset - starting fresh[/yellow]")
+            if config.publish is not None:
+                # --reset means "start from the beginning", and it does. But with a remote
+                # state branch that discards a cursor shared across sandboxes, not just a
+                # local file: every PR recorded there will be regenerated from scratch.
+                self.console.print(
+                    f"[bold yellow]WARNING: --reset will overwrite the durable state "
+                    f"branch {self.state_store.branch} on {config.publish.repo} at the "
+                    f"first save. Previously processed PRs will be regenerated.[/bold yellow]"
+                )
         else:
-            self.state = StreamState.load(self.state_file, repo)
+            self.state = self.state_store.load(repo)
 
         # Load skip list if provided
         if config.skip_list:
@@ -137,6 +161,13 @@ class StreamFarmer:
 
         # Graceful shutdown handling
         self.shutdown_requested = False
+        self.aborted = False
+
+        # PRs handled this run. Distinct from state.total_processed, which counts PRs
+        # *consumed* - a dry run and a pending publish deliberately consume nothing, and
+        # driving the prune/progress cadence off a counter that never moves would fire
+        # them on every iteration.
+        self.prs_seen = 0
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
@@ -192,7 +223,8 @@ class StreamFarmer:
         """Run the continuous farming process.
 
         Returns:
-            Exit code: 0 if any tasks succeeded, 1 otherwise
+            Exit code: 0 if any tasks succeeded, 1 otherwise. Aborting because publishing
+            broke is always a failure, even if earlier tasks published fine.
         """
         self._print_header()
 
@@ -204,6 +236,8 @@ class StreamFarmer:
         finally:
             self._finalize()
 
+        if self.aborted:
+            return 1
         return 0 if self.state.successful > 0 else 1
 
     def _print_header(self) -> None:
@@ -245,7 +279,7 @@ class StreamFarmer:
         # Print PR header
         merged_dt = datetime.fromisoformat(pr.merged_at.replace("Z", "+00:00"))
         self.console.print(
-            f"\n[bold cyan]═══ PR #{pr.number} ({self.state.total_processed + 1}) ═══[/bold cyan]"
+            f"\n[bold cyan]═══ PR #{pr.number} ({self.prs_seen + 1}) ═══[/bold cyan]"
         )
         self.console.print(f"[bold]{pr.title}[/bold]")
         self.console.print(
@@ -254,23 +288,65 @@ class StreamFarmer:
             f"+{pr.additions}/-{pr.deletions}[/dim]"
         )
 
+        # A PR left pending by an earlier publish failure already has a validated task on
+        # disk. Republish it instead of regenerating - force=True would delete it first.
+        publish_only = pr.number in self.state.publish_failed_prs
+
         # Process this PR completely before moving to next
-        result = _run_reversal_for_pr(pr, self.config, self.tasks_root, self.console)
+        result = _run_reversal_for_pr(
+            pr, self.config, self.tasks_root, self.console, publish_only=publish_only
+        )
         self.results.append(result)
 
+        self.prs_seen += 1
+
         # Mark as processed with detailed tracking
-        self.state.mark_processed(
-            pr.number, 
-            pr.created_at, 
-            result.status == "success",
-            task_id=result.task_id if result.status == "success" else None,
-            category=result.category,
-            message=result.message if result.category == "other" else None,
-        )
-        self._save_state()
+        if result.category == "rate_limited":
+            # Do NOT consume the PR. Claude hit a rate/usage limit - nothing was generated,
+            # and a re-run with a fresh token must still farm this PR. Record it (not just
+            # skip) so the fetcher exempts it from the resume-time skip; otherwise a PR
+            # sharing the cursor's exact created_at would be dropped and never retried.
+            # The run aborts below.
+            self.state.mark_claude_rate_limited(pr.number)
+        elif result.category == "publish_failed":
+            # Do NOT consume the PR. The task is valid and only publishing failed, so the
+            # next run must retry it rather than skip it. That retry is publish-only (see
+            # publish_only above): publishing is idempotent, so it finds the branch this
+            # task left behind, refreshes it, and opens the PR that never got created.
+            self.state.mark_publish_failed(pr.number)
+        elif result.status == "dry-run":
+            # --dry-run generates nothing. Recording the PR would consume it AND file it
+            # under other_failed_prs as "Unknown error" (success=False, category=None),
+            # so a later real run would skip a PR that was never farmed.
+            pass
+        elif result.status == "success" and self._publish_is_dry_run():
+            # Also do NOT consume the PR. The task was generated and validated but nothing
+            # reached the dataset repo, so a later real run must still farm this PR. The
+            # local mirror persists, and without this a dry run would silently poison it.
+            self.console.print(
+                f"[cyan]DRY RUN: task built but not published; leaving PR #{pr.number} "
+                f"unprocessed so a real run will farm it[/cyan]"
+            )
+        else:
+            self.state.mark_processed(
+                pr.number,
+                pr.created_at,
+                result.status == "success",
+                task_id=result.task_id if result.status == "success" else None,
+                category=result.category,
+                message=result.message if result.category == "other" else None,
+                pr_url=result.pr_url,
+            )
+        state_saved = self._save_state()
 
         # Show result
         self._print_result(result)
+
+        # A publish failure or a failed state push ends the run. Checked together: both can
+        # fail in the same iteration, and reporting only the first would tell the operator
+        # farm state was preserved when it was not.
+        if self._check_publish_health(result, state_saved):
+            return
 
         # Rate limit protection: only sleep after PRs that actually ran a CC session
         if not self._should_delay_after(result):
@@ -283,14 +359,89 @@ class StreamFarmer:
             )
             time.sleep(self.config.task_delay)
 
-        # Periodic summary
-        if self.state.total_processed % 10 == 0:
+        # Periodic summary. Driven by PRs seen this run, not PRs consumed: dry runs and
+        # pending publishes consume nothing, and `0 % n == 0` would fire every iteration.
+        if self.prs_seen % 10 == 0:
             self._print_progress()
 
         # Docker cleanup after batch
         if self.config.docker_prune_batch > 0:
-            if self.state.total_processed % self.config.docker_prune_batch == 0:
+            if self.prs_seen % self.config.docker_prune_batch == 0:
                 self._prune_docker()
+
+    def _publish_is_dry_run(self) -> bool:
+        """True when publishing is configured but pushes and PR creation are suppressed."""
+        return self.config.publish is not None and self.config.publish.dry_run
+
+    def _abort(self, reason: str, detail: str = "", state_saved: bool = True) -> None:
+        """Stop the run loudly, so an operator can reach the sandbox before reclamation.
+
+        `state_saved` must reflect whether the durable state branch actually advanced. A
+        publish failure and a state-push failure can happen in the same iteration, and
+        telling the operator that state was preserved when it was not sends them into the
+        next run expecting a resume that will not happen.
+        """
+        self.aborted = True
+        self.shutdown_requested = True
+        body = reason
+        if detail:
+            body += f"\n\n{detail}"
+
+        if state_saved:
+            body += (
+                "\n\nFix the token or GitHub connectivity, then re-run. Farm state is "
+                "preserved, so already-processed PRs will not be regenerated."
+            )
+        else:
+            body += (
+                "\n\nThe durable state branch was NOT updated: this run's progress exists "
+                f"only in the local mirror ({self.state_file}). Recover it before this "
+                "sandbox is reclaimed, or a re-run will regenerate the PRs processed here."
+            )
+
+        self.console.print(
+            Panel(Text(body, style="red"), title="[red]Stopping[/red]", border_style="red")
+        )
+
+    def _check_publish_health(self, result: TaskResult, state_saved: bool) -> bool:
+        """Stop the run on a fatal condition. True = stop farming.
+
+        Fatal: a publish failure, a failed state push, or a Claude rate/usage limit. Each
+        will recur on the next PR - a broken remote, or an exhausted token - so continuing
+        would spend a full Claude Code session per PR only to fail at the same wall.
+        Publish and state-push are checked together because a broken GitHub hits both in one
+        iteration and the operator needs to hear about both. Stopping loudly is what lets an
+        operator reach a Daytona sandbox before it is reclaimed.
+        """
+        rate_limited = result.category == "rate_limited"
+        publish_failed = result.category == "publish_failed"
+        if not rate_limited and not publish_failed and state_saved:
+            return False
+
+        if rate_limited:
+            reason = result.message
+            detail = (
+                "Every task draws from the same limit, so this will not clear until the "
+                "token or account is swapped. Re-run with a fresh token.\n"
+                f"PR #{result.pr_number} was left unprocessed, so it will be farmed then."
+            )
+        elif publish_failed:
+            reason = result.message
+            detail = (
+                f"The task passed every validation gate and was left in "
+                f"{self.tasks_root}/{result.task_id} - it can be pushed by hand.\n"
+                f"On an ephemeral sandbox, recover it before the sandbox is reclaimed.\n"
+                f"PR #{result.pr_number} was left unprocessed, so a re-run will retry it."
+            )
+        else:
+            reason = "Farm state could not be pushed to the state branch."
+            detail = (
+                "Continuing would leave the durable cursor stale, so a resumed sandbox "
+                "would regenerate every PR processed from this point on."
+            )
+
+        self._abort(reason, detail, state_saved=state_saved)
+        return True
 
     def _should_delay_after(self, result: TaskResult) -> bool:
         """Whether to sleep before the next PR.
@@ -298,6 +449,10 @@ class StreamFarmer:
         Only PRs that reached the Claude Code session need the delay. Dry runs and
         PRs rejected by a cheap filter (trivial, no linked issue, no tests, already
         exists) did no meaningful API work, so waiting on them is dead time.
+
+        Note "rate_limited" and "publish_failed" are deliberately absent from
+        SKIPPED_CATEGORIES: both mean a CC session ran. They abort the run in
+        _check_publish_health before the delay is reached anyway.
         """
         if result.status == "dry-run":
             return False
@@ -311,6 +466,8 @@ class StreamFarmer:
         """
         if result.status == "success":
             self.console.print(f"[green]✓ Success: {result.message}[/green]")
+            if result.pr_url:
+                self.console.print(f"[green]  PR: {result.pr_url}[/green]")
         elif result.status == "dry-run":
             self.console.print(f"[cyan]○ Dry-run: {result.message}[/cyan]")
         else:
@@ -348,7 +505,13 @@ class StreamFarmer:
         )
 
     def _prune_docker(self) -> None:
-        """Run docker cleanup to free disk space."""
+        """Run docker cleanup to free disk space.
+
+        WARNING: `docker system prune -af` is global to the daemon. Two farm processes
+        sharing a host will destroy each other's images and build cache mid-validation.
+        One container per repo is the intended deployment; if you colocate farms, pass
+        --docker-prune-batch 0 to all but one.
+        """
         if shutil.which("docker") is None:
             self.console.print(
                 "[yellow]Skipping docker prune (docker binary not found in PATH).[/yellow]"
@@ -398,13 +561,38 @@ class StreamFarmer:
 
         self.console.print("[green]Docker cleanup completed[/green]")
 
-    def _save_state(self) -> None:
-        """Save state to file."""
-        self.state.save(self.state_file)
+    def _save_state(self) -> bool:
+        """Persist state via the configured store. Returns False if it could not be saved.
+
+        With publishing enabled this pushes to the state branch, so a sandbox killed
+        mid-run resumes from the last completed PR. _finalize() runs from a finally
+        block, which means a Daytona SIGTERM flushes state before exit.
+
+        A failure here is as serious as a failed task publish: if the state branch stops
+        advancing, a resumed sandbox redoes work it already paid for. The caller stops
+        the run. The local mirror is still written, so nothing is lost from disk.
+        """
+        try:
+            self.state_store.save(self.state)
+            return True
+        except PublishError as e:
+            self.console.print(f"[red]Could not persist farm state: {e}[/red]")
+            return False
 
     def _finalize(self) -> None:
-        """Finalize the run and print summary."""
-        self._save_state()
+        """Finalize the run and print summary.
+
+        Runs from a finally block, so a Daytona SIGTERM flushes state before exit. A final
+        state push that fails is recorded as an abort: the durable cursor is now behind the
+        work actually done, and a resumed sandbox would redo it. Exiting 0 would tell a
+        supervisor everything was fine.
+        """
+        if not self._save_state():
+            self.aborted = True
+            self.console.print(
+                "[red]Final state push failed - the durable cursor is stale. "
+                "Recover the local state mirror before this sandbox is reclaimed.[/red]"
+            )
         self._save_log()
 
         self.console.print("\n")
@@ -441,6 +629,12 @@ class StreamFarmer:
                 table.add_row("  Timeouts", str(len(self.state.timeout_prs)))
             if self.state.git_error_prs:
                 table.add_row("  Git Errors", str(len(self.state.git_error_prs)))
+            if self.state.publish_failed_prs:
+                table.add_row("  Publish Failed", str(len(self.state.publish_failed_prs)))
+            if self.state.claude_rate_limited_prs:
+                table.add_row(
+                    "  Claude Rate-Limited", str(len(self.state.claude_rate_limited_prs))
+                )
             if self.state.other_failed_prs:
                 table.add_row("  Other Errors", str(len(self.state.other_failed_prs)))
 

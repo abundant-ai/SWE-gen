@@ -17,13 +17,20 @@ from rich.text import Text
 from rich.traceback import install as rich_traceback_install
 
 from swegen.config import CreateConfig
+from swegen.publish import PublishContext, PublishError, PublishResult, TaskSink, build_task_sink
 from swegen.tools.harbor_runner import parse_harbor_outcome, run_harbor_agent
 from swegen.tools.policy import find_test_network_violations, format_violations
 from swegen.tools.validate_utils import ValidationError, run_nop_oracle
 
 from . import MissingIssueError, PRToHarborPipeline, TrivialPRError
-from .claude_code_runner import ClaudeCodeResult, run_claude_code_session
+from .claude_code_runner import (
+    ClaudeCodeResult,
+    ClaudeRateLimitError,
+    is_rate_limit_failure,
+    run_claude_code_session,
+)
 from .repo_cache import RepoCache
+from .task_reference import TaskReferenceStore
 
 # -----------------------------------------------------------------------------
 # Helper functions for run_reversal phases
@@ -89,13 +96,15 @@ def _check_dedupe(
     repo_key: str,
     state_file: Path,
     force: bool,
-) -> bool:
+) -> dict | None:
     """Check if task already exists in state file.
 
-    Returns True if duplicate found and should skip, False otherwise.
+    Returns the recorded state entry if a duplicate is found, else None. The caller needs
+    the record - not just a bool - because a previously generated task may still be
+    unpublished, and its recorded directory is where the task lives.
     """
     if force or not state_file.exists():
-        return False
+        return None
 
     last_rec = None
     logger = logging.getLogger("swegen")
@@ -117,12 +126,12 @@ def _check_dedupe(
             Panel(
                 body,
                 title=f"Duplicate key: [bold]{repo_key}[/bold]",
-                subtitle="Use --force to regenerate",
+                subtitle="Reusing the existing task; --force to regenerate",
                 border_style="yellow",
             )
         )
-        return True
-    return False
+        return last_rec
+    return None
 
 
 def _display_validation_results(
@@ -255,8 +264,13 @@ def _save_state_record(
     pr: int,
     task_id: str,
     task_dir: Path,
+    published: bool = True,
 ) -> None:
     """Save a record of the generated task to the state file.
+
+    Written even when publishing failed (`published=False`), so a rerun's dedupe check
+    finds the task and republishes it instead of hitting FileExistsError and needing
+    --force, which would delete the validated task.
 
     This is non-fatal - errors are logged but do not stop execution.
     """
@@ -270,6 +284,7 @@ def _save_state_record(
             "task_id": task_id,
             "harbor": str(task_dir.resolve()),
             "ts": datetime.now(UTC).isoformat(),
+            "published": published,
         }
         with open(state_file, "a") as f:
             f.write(json.dumps(rec) + "\n")
@@ -279,6 +294,145 @@ def _save_state_record(
     except Exception as e:
         # Catch-all for unexpected errors, but still log them
         logger.warning(f"Unexpected error saving state record for {repo_key}: {e}", exc_info=True)
+
+
+def _save_task_reference(
+    console: Console,
+    config: CreateConfig,
+    repo: str,
+    task_id: str,
+    pr: int,
+    task_dir: Path,
+) -> None:
+    """Record this validated task as the repo's reference for faster future generation.
+
+    Skipped under --cleanup-local: the task directory is deleted after publishing, and a
+    reference tells Claude Code to read that directory - a dangling pointer helps nobody.
+    Non-fatal: a reference is only a speed-up, so a failure is warned, not raised.
+    """
+    if config.publish is not None and config.publish.cleanup_local:
+        return
+    try:
+        reference_file = Path(config.state_dir) / "task_references.json"
+        TaskReferenceStore(reference_file=reference_file).save(
+            repo=repo, task_id=task_id, pr_number=pr
+        )
+    except Exception as e:
+        console.print(f"[yellow]Warning: Could not save task reference: {e}[/yellow]")
+
+
+def _cleanup_local_task(console: Console, task_dir: Path) -> None:
+    """Delete the local task directory after it has been durably published.
+
+    Caller must have confirmed the task reached the dataset repo. Non-fatal: a failed
+    delete only wastes disk, so it is logged, not raised.
+    """
+    import shutil
+
+    try:
+        if task_dir.exists():
+            shutil.rmtree(task_dir)
+            console.print(f"[dim]Removed local task copy {task_dir} (published)[/dim]")
+    except OSError as e:
+        console.print(f"[yellow]Could not remove local task copy {task_dir}: {e}[/yellow]")
+
+
+def _preflight_publish(console: Console, config: CreateConfig, repo: str) -> TaskSink:
+    """Build the sink and verify the dataset repo is writable, before any work begins.
+
+    Called up front so a bad token fails in seconds rather than after a full Claude Code
+    session and Harbor validation have already been paid for.
+    """
+    sink = build_task_sink(config.publish, repo, state_dir=config.state_dir)
+    if config.publish is not None:
+        console.print(
+            f"[cyan]Publishing to {config.publish.repo} (base: {config.publish.base_branch})[/cyan]"
+        )
+        sink.preflight()
+    return sink
+
+
+def publish_existing_task(
+    console: Console,
+    config: CreateConfig,
+    repo: str,
+    pr: int,
+    record: dict,
+) -> PublishResult | None:
+    """Publish a task that already exists on disk, without regenerating it.
+
+    Used for two recoveries:
+      * a dedupe hit - the task exists but may never have reached the dataset repo
+      * a publish-only retry after a failed push, where regenerating would destroy the
+        validated task the farm deliberately preserved
+
+    Returns the full PublishResult, not just the URL: a successful republish of a task
+    already merged into the base branch has published=True but no URL, and the caller must
+    key "did this reach the dataset repo?" on `published`, not on the URL. None only when
+    publishing is disabled.
+    """
+    if config.publish is None:
+        return None
+
+    task_dir = Path(record.get("harbor", ""))
+    task_id = record.get("task_id") or task_dir.name
+    if not task_dir.exists():
+        # Never return None here: the caller would read that as "published, nothing to do"
+        # and exit successfully having published nothing. Callers that can recover check
+        # the directory first and regenerate instead.
+        raise PublishError(
+            f"Task {task_id} is recorded in state but missing from disk ({task_dir}); "
+            f"nothing to publish."
+        )
+
+    console.print(f"[cyan]Task already generated; publishing {task_id} from {task_dir}[/cyan]")
+    sink = _preflight_publish(console, config, repo)
+    return _publish_task(console, config, sink, repo, pr, task_id, task_dir, metadata={})
+
+
+def _publish_task(
+    console: Console,
+    config: CreateConfig,
+    sink: TaskSink,
+    repo: str,
+    pr: int,
+    task_id: str,
+    task_dir: Path,
+    metadata: dict,
+) -> PublishResult | None:
+    """Publish the validated task as a PR on the dataset repo.
+
+    Runs only after every gate has passed, so the dataset repo never receives a task
+    that failed validation. Raises PublishError on failure - an unpublished task is
+    lost when an ephemeral sandbox dies, so it is not a success.
+
+    Runs BEFORE the dedupe record is written, so a task that never reached the dataset
+    repo is not recorded as fully published. The caller still records it on failure,
+    flagged published=False, so a rerun republishes it instead of needing --force.
+
+    Returns the full PublishResult (callers need `published`, not just the URL: a dry run
+    and an already-merged task both yield no URL but mean different things), or None when
+    publishing is disabled.
+    """
+    if config.publish is None:
+        return None
+
+    ctx = PublishContext(
+        task_id=task_id,
+        task_dir=task_dir,
+        source_repo=repo,
+        source_pr=pr,
+        source_pr_url=metadata.get("html_url", f"https://github.com/{repo}/pull/{pr}"),
+        metadata=metadata,
+    )
+
+    console.print(Rule(Text("Publish", style="bold blue")))
+    result = sink.publish(ctx)
+    if result.pr_url:
+        console.print(f"[green]✓ Published {task_id} → {result.pr_url}[/green]")
+    elif config.publish.dry_run:
+        console.print(f"[cyan]DRY RUN: would publish {task_id} on branch {result.branch}[/cyan]")
+    return result
 
 
 def _display_summary_panel(
@@ -410,11 +564,19 @@ def _run_harbor_validations(
     return results_rows, job_dirs
 
 
-def run_reversal(config: CreateConfig) -> None:
+def run_reversal(config: CreateConfig) -> str | None:
     """Convert a merged PR into a Harbor task.
 
     Args:
         config: Typed configuration with repo, PR number, and options.
+
+    Returns:
+        URL of the pull request the task was published to, or None when publishing is
+        disabled (no config.publish), when --publish-dry-run suppressed the push, or when
+        the task was already merged into the base branch and needed no PR.
+
+        A dedupe hit does not return early: the recorded task is republished (it may never
+        have reached the dataset repo), or - if its directory is gone - regenerated.
     """
     rich_traceback_install(show_locals=False)
     console = Console()
@@ -436,8 +598,44 @@ def run_reversal(config: CreateConfig) -> None:
         repo_key = f"{pipeline.repo.lower()}#{config.pr}"
         state_dir: Path = config.state_dir or Path(".swegen")
         state_file = state_dir / "create.jsonl"
-        if _check_dedupe(console, repo_key, state_file, config.force):
-            return
+        duplicate = _check_dedupe(console, repo_key, state_file, config.force)
+        if duplicate is not None:
+            duplicate_dir = Path(duplicate.get("harbor", ""))
+            if not duplicate_dir.exists():
+                # Stale record: the task it names is gone, so there is nothing to publish
+                # and nothing to protect. Fall through and regenerate rather than exiting
+                # successfully having done nothing.
+                console.print(
+                    f"[yellow]Recorded task is missing from disk ({duplicate_dir}); "
+                    f"regenerating.[/yellow]"
+                )
+            else:
+                # The task exists on disk but may never have been published (a prior run
+                # whose push failed records published=False). Publish it rather than
+                # returning as if the work were done, and never regenerate - that would
+                # delete a valid task.
+                result = publish_existing_task(console, config, pipeline.repo, config.pr, duplicate)
+                # Supersede the unpublished record once the republish actually reaches the
+                # dataset repo. Key on `published`, not the URL: a task already merged into
+                # the base branch republishes with published=True and no URL, and keying on
+                # the URL would leave published=False forever and republish on every run.
+                published = result.published if result else False
+                if published and not duplicate.get("published", True):
+                    _save_state_record(
+                        state_dir,
+                        state_file,
+                        repo_key,
+                        pipeline.repo,
+                        config.pr,
+                        duplicate.get("task_id") or duplicate_dir.name,
+                        duplicate_dir,
+                        published=True,
+                    )
+                return result.pr_url if result else None
+
+        # Verify the dataset repo is writable before spending a Claude Code session on a
+        # task we would then be unable to publish.
+        sink = _preflight_publish(console, config, pipeline.repo)
 
         harbor_root = config.output
         harbor_root.mkdir(parents=True, exist_ok=True)
@@ -541,6 +739,13 @@ def run_reversal(config: CreateConfig) -> None:
             )
 
             gen_secs = time.perf_counter() - t0
+
+            # A rate/usage limit is not this task's fault and will hit every following task
+            # until the token is swapped. Raise so the farm aborts and the PR is left
+            # unprocessed for a re-run with a fresh token, rather than reporting the task as
+            # a validation failure and moving on.
+            if cc_result and not cc_result.success and is_rate_limit_failure(cc_result.error_message):
+                raise ClaudeRateLimitError(cc_result.error_message or "Claude rate limit")
 
             if cc_result and cc_result.success:
                 console.print()
@@ -665,14 +870,68 @@ def run_reversal(config: CreateConfig) -> None:
             console, harbor_validation_failed, cc_validation_failed, harbor_actually_ran
         )
 
+        # Save the task reference now: the task is validated, and this is BEFORE publish, so
+        # a task that then fails to publish (or is republished on retry, which never calls
+        # run_reversal) still records its reference for faster future generation.
+        _save_task_reference(console, config, pipeline.repo, task_id, config.pr, task_dir)
+
+        # Publish before recording the dedupe entry, so a task that never reached the
+        # dataset repo is not recorded as fully done.
+        try:
+            publish_result = _publish_task(
+                console, config, sink, pipeline.repo, config.pr, task_id, task_dir, metadata
+            )
+        except PublishError:
+            # Still record the task, flagged unpublished. The task is valid - only the push
+            # failed - and without a record a rerun would hit FileExistsError on the task
+            # directory and need --force, which deletes it. With the record, dedupe finds
+            # the task and republishes it (publish_existing_task), matching the farm's
+            # publish-only retry.
+            _save_state_record(
+                state_dir,
+                state_file,
+                repo_key,
+                pipeline.repo,
+                config.pr,
+                task_id,
+                task_dir,
+                published=False,
+            )
+            raise
+
+        # `published` must reflect what actually reached the dataset repo. A dry run makes
+        # no push and opens no PR, so recording published=True would claim work that was
+        # never done and let a later real run treat the task as fully handled. With
+        # publishing disabled there is nothing to publish, so the record is complete.
+        pr_url = publish_result.pr_url if publish_result else None
+        published = publish_result.published if publish_result else True
+
+        # Whether the task actually reached the dataset repo (a real branch/PR, or already
+        # merged into base). Distinct from `published` above, which is True even when
+        # publishing is disabled - keying cleanup on that would delete the only copy.
+        did_publish = publish_result is not None and publish_result.published
+
         # Save state record (non-fatal if fails)
         _save_state_record(
-            state_dir, state_file, repo_key, pipeline.repo, config.pr, task_id, task_dir
+            state_dir,
+            state_file,
+            repo_key,
+            pipeline.repo,
+            config.pr,
+            task_id,
+            task_dir,
+            published=published,
         )
 
         # Display final panels
         _display_summary_panel(
-            console, pipeline.repo, config.pr, task_id, task_dir, gen_log_path, validation_table,
+            console,
+            pipeline.repo,
+            config.pr,
+            task_id,
+            task_dir,
+            gen_log_path,
+            validation_table,
             linked_issues=linked_issues,
         )
         _display_logs_panel(
@@ -682,6 +941,36 @@ def run_reversal(config: CreateConfig) -> None:
             harbor_oracle_job_dir,
         )
         _display_next_steps_panel(console, harbor_root, task_id)
+
+        # Cleanup is the LAST step: everything above (summary panel, state record) reads the
+        # task dir. Only ever deletes a task that reached the dataset repo, so the remote is
+        # the surviving copy. The farm suppresses this (passes cleanup_local=False) and does
+        # its own cleanup after saving a task reference.
+        if config.publish is not None and config.publish.cleanup_local and did_publish:
+            _cleanup_local_task(console, task_dir)
+
+        return pr_url
+    except ClaudeRateLimitError as e:
+        # Anthropic rate/usage limit: not this task's fault, and fatal for a farm run.
+        console.print(
+            Panel(
+                Text(
+                    f"Claude Code hit a rate/usage limit:\n{e}\n\n"
+                    f"Every task draws from the same limit, so this will not clear until the "
+                    f"token or account is swapped. Re-run with a fresh token.",
+                    style="red",
+                ),
+                title="[red]Claude Rate Limit[/red]",
+                border_style="red",
+            )
+        )
+        raise
+    except PublishError as e:
+        # Already-diagnosed publish failure: show the reason, skip the traceback.
+        console.print(
+            Panel(Text(str(e), style="red"), title="[red]Publish Failed[/red]", border_style="red")
+        )
+        raise
     except (TrivialPRError, MissingIssueError, ValidationError, FileExistsError):
         # Re-raise these exceptions so caller can handle them
         raise
