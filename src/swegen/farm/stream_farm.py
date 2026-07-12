@@ -28,7 +28,42 @@ from .farm_hand import (
 from .fetcher import StreamingPRFetcher, load_skip_list
 from .state import StreamState
 
-DOCKER_CLEANUP_CMD = "docker system prune -af"
+# Harbor names every task image "hb__{environment_name}" (see harbor's docker
+# environment). Matching that prefix lets us reclaim the per-task images -- which are
+# the ones that actually consume disk -- without touching base images (ubuntu, language
+# runtimes) or any unrelated image on the host, both of which `docker system prune -af`
+# would happily delete.
+HARBOR_IMAGE_GLOB = "hb__*"
+
+
+def docker_cleanup_cmds(build_cache_keep: str) -> list[str]:
+    """Docker cleanup steps, in order.
+
+    Containers are pruned before images so image removal is not blocked by stopped
+    trial containers. The build cache is trimmed to a ceiling rather than emptied:
+    layers are evicted least-recently-used first, so the base + runtime layers shared
+    by every task survive and rebuilds stay warm, while the per-task layers (whose
+    cache keys embed the task's head SHA, so they are never hit again) are reclaimed.
+    """
+    return [
+        "docker container prune -f",
+        f'docker image ls --filter "reference={HARBOR_IMAGE_GLOB}" -q | xargs -r docker rmi -f',
+        "docker volume prune -f",
+        f"docker builder prune -f --keep-storage {build_cache_keep}",
+    ]
+
+# Failure categories where the PR was rejected by a cheap filter, before the
+# Claude Code session ran. These paths make only a couple of GitHub API calls and
+# never touch the Anthropic API, so there is nothing to rate limit against and the
+# inter-task delay is pure dead time.
+SKIPPED_CATEGORIES = frozenset(
+    {
+        "trivial",
+        "no_issue",
+        "no_tests",
+        "already_exists",
+    }
+)
 
 
 class StreamFarmer:
@@ -313,9 +348,16 @@ class StreamFarmer:
         if self._check_publish_health(result, state_saved):
             return
 
-        # Rate limit protection: sleep between PRs
-        self.console.print(f"[dim]Waiting {self.config.task_delay} seconds before next PR...[/dim]")
-        time.sleep(self.config.task_delay)
+        # Rate limit protection: only sleep after PRs that actually ran a CC session
+        if not self._should_delay_after(result):
+            self.console.print(
+                f"[dim]Skipping delay ({result.category or result.status}, no CC session run)[/dim]"
+            )
+        elif self.config.task_delay > 0:
+            self.console.print(
+                f"[dim]Waiting {self.config.task_delay} seconds before next PR...[/dim]"
+            )
+            time.sleep(self.config.task_delay)
 
         # Periodic summary. Driven by PRs seen this run, not PRs consumed: dry runs and
         # pending publishes consume nothing, and `0 % n == 0` would fire every iteration.
@@ -401,6 +443,21 @@ class StreamFarmer:
         self._abort(reason, detail, state_saved=state_saved)
         return True
 
+    def _should_delay_after(self, result: TaskResult) -> bool:
+        """Whether to sleep before the next PR.
+
+        Only PRs that reached the Claude Code session need the delay. Dry runs and
+        PRs rejected by a cheap filter (trivial, no linked issue, no tests, already
+        exists) did no meaningful API work, so waiting on them is dead time.
+
+        Note "rate_limited" and "publish_failed" are deliberately absent from
+        SKIPPED_CATEGORIES: both mean a CC session ran. They abort the run in
+        _check_publish_health before the delay is reached anyway.
+        """
+        if result.status == "dry-run":
+            return False
+        return result.category not in SKIPPED_CATEGORIES
+
     def _print_result(self, result: TaskResult) -> None:
         """Print the result of processing a PR.
 
@@ -461,43 +518,48 @@ class StreamFarmer:
             )
             return
 
+        cmds = docker_cleanup_cmds(self.config.build_cache_keep)
         self.console.print(
             Panel(
-                f"Running docker cleanup: {DOCKER_CLEANUP_CMD}",
+                "Running docker cleanup:\n" + "\n".join(f"  {cmd}" for cmd in cmds),
                 title="Disk cleanup",
                 border_style="yellow",
             )
         )
 
-        try:
-            result = subprocess.run(
-                DOCKER_CLEANUP_CMD,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=600,
-            )
-            if result.returncode == 0:
-                stdout = result.stdout.strip()
-                if stdout:
-                    # Show summary if available
-                    lines = stdout.split("\n")
-                    summary_lines = [
-                        line
-                        for line in lines
-                        if "reclaimed" in line.lower()
-                        or "deleted" in line.lower()
-                        or "total" in line.lower()
-                    ]
-                    if summary_lines:
-                        self.console.print(f"[dim]{summary_lines[0]}[/dim]")
-                self.console.print("[green]Docker cleanup completed[/green]")
-            else:
-                self.console.print(f"[red]Docker cleanup failed (exit {result.returncode})[/red]")
+        for cmd in cmds:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired:
+                self.console.print(f"[red]Docker cleanup timed out after 600s: {cmd}[/red]")
+                continue
+
+            if result.returncode != 0:
+                # Keep going: a failed step (e.g. an image still in use) should not
+                # prevent the remaining steps from reclaiming what they can.
+                self.console.print(
+                    f"[red]Docker cleanup step failed (exit {result.returncode}): {cmd}[/red]"
+                )
                 if result.stderr:
                     self.console.print(f"[red]{result.stderr.strip()}[/red]")
-        except subprocess.TimeoutExpired:
-            self.console.print("[red]Docker prune timed out after 600s[/red]")
+                continue
+
+            # Show the reclaimed-space summary when docker reports one.
+            summary_lines = [
+                line
+                for line in result.stdout.strip().split("\n")
+                if "reclaimed" in line.lower() or "total" in line.lower()
+            ]
+            if summary_lines:
+                self.console.print(f"[dim]{summary_lines[0]}[/dim]")
+
+        self.console.print("[green]Docker cleanup completed[/green]")
 
     def _save_state(self) -> bool:
         """Persist state via the configured store. Returns False if it could not be saved.

@@ -481,6 +481,11 @@ def farm(
     docker_prune_batch: int = typer.Option(
         5, help="Run docker cleanup after every N PRs (0 to disable)", show_default=True
     ),
+    build_cache_keep: str = typer.Option(
+        "20GB",
+        help="Docker build cache to retain during cleanup (keeps base/runtime layers warm)",
+        show_default=True,
+    ),
     skip_list: str
     | None = typer.Option(None, help="Path to file with task IDs to skip (one per line)"),
     no_cache: bool = typer.Option(
@@ -582,6 +587,7 @@ def farm(
         cc_timeout=cc_timeout,
         api_delay=api_delay,
         task_delay=task_delay,
+        build_cache_keep=build_cache_keep,
         reset=reset,
         resume_from=resume_from,
         dry_run=dry_run,
