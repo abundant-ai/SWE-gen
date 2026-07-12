@@ -174,19 +174,24 @@ _SELF_PREFIX_RE = re.compile(r"^PR #\d+\b(?:\s+is)?\s*:?\s*", re.IGNORECASE)
 CATEGORY_LABELS = {
     "trivial": ("Trivial PR (skipped)", "trivial"),
     "no_issue": ("No linked issue (skipped)", "linked issue"),
-    "validation_failed": ("Validation failed (NOP or Oracle)", "validation"),
+    # Not "(NOP or Oracle)": this category also covers the offline-tests policy and the
+    # task-structure checks. The Harbor message names NOP/Oracle itself when that is the
+    # cause, and the label is skipped whenever the detail already says "validation".
+    "validation_failed": ("Validation failed", "validation"),
     "already_exists": ("Task already exists (skipped)", "already exists"),
 }
 
 
-def _failure_message(pr_number: int, category: str | None, error_msg: str) -> str:
+def _failure_message(category: str | None, error_msg: str) -> str:
     """Render the human-facing reason for a failed PR.
 
     Keeps the exception's detail ("Too many source files modified (14, max 10)"), which a
     bare label drops, and prepends the label only when the detail does not already say it.
     """
-    detail = _SELF_PREFIX_RE.sub("", (error_msg or "").replace("\n", " ").strip())
-    if detail:
+    detail, stripped = _SELF_PREFIX_RE.subn("", (error_msg or "").replace("\n", " ").strip())
+    # Only re-capitalise what the strip decapitated ("PR #9413 is too trivial" ->
+    # "Too trivial"). Messages that start lowercase on their own may begin with a path.
+    if stripped and detail:
         detail = detail[0].upper() + detail[1:]
 
     label, spoken_for = CATEGORY_LABELS.get(category or "", (None, None))
@@ -515,7 +520,7 @@ def _run_reversal_for_pr_impl(
     # which category they belong to. The category drives the inter-PR delay and the run
     # summary's failure breakdown, so it has to be exact.
     failure_category = error_category
-    failure_reason = _failure_message(pr.number, error_category, error_msg)
+    failure_reason = _failure_message(error_category, error_msg)
 
     if failure_category == "publish_failed":
         # The task itself is valid - it passed every gate and only the push/PR failed.
