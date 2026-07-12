@@ -40,7 +40,9 @@ def generate_dockerfile(params: SkeletonParams) -> str:
     - Post-patch rebuild (if needed)
     
     Git clone strategy:
-    - Simple + robust: clone, then fetch the exact commit SHA.
+    - Shallow: init an empty repo, then fetch only the exact commit SHA at depth 1.
+      The image needs a single commit's worktree (the .git dir is deleted at the end),
+      so fetching history would be downloaded and then thrown away.
     - NOTE: `head_sha` currently comes from the PR's HEAD branch tip (GitHub API).
     - If the PR was squash-merged/rebased, that commit may not be on any normal branch.
     - In that case, fetching `refs/pull/<n>/head` is a robust fallback without fetching ALL PR refs.
@@ -78,9 +80,11 @@ RUN apt-get update && apt-get install -y \\
 
 WORKDIR /app
 
-# Clone repo at HEAD commit (with fix applied)
-RUN git clone {params.repo_url} src && \\
+# Fetch repo at HEAD commit (with fix applied).
+# Shallow on purpose: only this one commit's worktree is needed, and .git is removed below.
+RUN git init src && \\
     cd src && \\
+    git remote add origin {params.repo_url} && \\
     (git fetch --depth 1 origin {params.head_sha} || git fetch --depth 1 origin "+refs/pull/{params.pr_number}/head:refs/remotes/origin/pr/{params.pr_number}") && \\
     git checkout --detach FETCH_HEAD && \\
     git submodule update --init --recursive

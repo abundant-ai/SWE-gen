@@ -200,6 +200,7 @@ class PRToHarborPipeline:
                 repo=self.repo,
                 head_sha=metadata["head_sha"],
                 repo_url=metadata["repo_url"],
+                base_sha=metadata.get("base_sha"),
             )
         logger.info("Repo at: %s", repo_path)
 
