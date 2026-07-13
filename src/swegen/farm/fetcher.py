@@ -21,9 +21,14 @@ from .state import StreamState
 _MAX_PAGE_ATTEMPTS = 5
 _BACKOFF_BASE_SECONDS = 2.0
 _MAX_BACKOFF_SECONDS = 60.0
-# Rate-limit resets can be far out; wait for one rather than burning an attempt, but do
-# not sit for an unbounded stretch.
-_MAX_RATE_LIMIT_WAIT_SECONDS = 300.0
+
+# A rate limit is not a failure - it is GitHub telling us exactly when to come back - so a
+# wait does not consume a retry attempt. GitHub's primary limit resets on the hour, so the
+# ceiling is generous enough to sit one out (the proactive check further down already
+# sleeps to the reset uncapped). The number of waits is bounded instead, so a bogus header
+# cannot park the farm forever.
+_MAX_RATE_LIMIT_WAIT_SECONDS = 3600.0
+_MAX_RATE_LIMIT_WAITS = 3
 
 # Worth another try: server-side wobble or throttling, both of which pass.
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -165,16 +170,26 @@ class StreamingPRFetcher:
         missing repo will not fix itself, so retrying only delays the real error.
         """
         last_error = "unknown"
+        # An explicit counter, not `for attempt in range(...)`: a rate-limit wait must NOT
+        # advance it. With a for-loop, `continue` after a wait silently burns an attempt,
+        # so a primary limit whose reset is an hour out would exhaust the budget waiting and
+        # then kill the run - the opposite of the intent.
+        attempt = 0
+        rate_limit_waits = 0
 
-        for attempt in range(1, _MAX_PAGE_ATTEMPTS + 1):
+        def _backoff(n: int) -> float:
+            return min(_BACKOFF_BASE_SECONDS * 2 ** (n - 1), _MAX_BACKOFF_SECONDS)
+
+        while attempt < _MAX_PAGE_ATTEMPTS:
             try:
                 resp = requests.get(url, headers=self.headers, params=params, timeout=30)
             except requests.exceptions.RequestException as exc:
                 # Connection reset, DNS, timeout: always transient.
+                attempt += 1
                 last_error = f"{type(exc).__name__}: {exc}"
-                if attempt == _MAX_PAGE_ATTEMPTS:
+                if attempt >= _MAX_PAGE_ATTEMPTS:
                     break
-                delay = min(_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), _MAX_BACKOFF_SECONDS)
+                delay = _backoff(attempt)
                 self.console.print(
                     f"[yellow]Page {page}: {last_error} - retrying in {delay:.0f}s "
                     f"(attempt {attempt}/{_MAX_PAGE_ATTEMPTS})[/yellow]"
@@ -187,15 +202,26 @@ class StreamingPRFetcher:
 
             wait = self._rate_limit_wait(resp)
             if wait is not None:
-                # Throttled. Waiting it out does not consume an attempt - the request was
-                # never really tried - or a long limit would burn the whole budget.
+                # Throttled. GitHub told us when to come back, so this is not a failed
+                # attempt - do not touch `attempt`. Bound the number of waits instead, so a
+                # malformed reset header cannot park the farm indefinitely.
+                rate_limit_waits += 1
+                last_error = f"HTTP {resp.status_code} {resp.reason} (rate limited)"
+                if rate_limit_waits > _MAX_RATE_LIMIT_WAITS:
+                    last_error = (
+                        f"still rate limited after {_MAX_RATE_LIMIT_WAITS} waits "
+                        f"({resp.status_code} {resp.reason})"
+                    )
+                    break
                 self.console.print(
-                    f"[yellow]Page {page}: rate limited ({resp.status_code}), "
-                    f"waiting {wait:.0f}s...[/yellow]"
+                    f"[yellow]Page {page}: rate limited ({resp.status_code}), waiting "
+                    f"{wait:.0f}s (wait {rate_limit_waits}/{_MAX_RATE_LIMIT_WAITS}, "
+                    f"does not count as a retry)...[/yellow]"
                 )
                 time.sleep(wait)
                 continue
 
+            attempt += 1
             last_error = f"HTTP {resp.status_code} {resp.reason}"
             if resp.status_code not in _RETRYABLE_STATUS:
                 # 401 (bad token), 404 (no such repo), 403 (no access): terminal.
@@ -203,22 +229,19 @@ class StreamingPRFetcher:
                 self.console.print(f"[red]API error on page {page}: {last_error}[/red]")
                 return None
 
-            if attempt == _MAX_PAGE_ATTEMPTS:
+            if attempt >= _MAX_PAGE_ATTEMPTS:
                 break
-            delay = min(_BACKOFF_BASE_SECONDS * 2 ** (attempt - 1), _MAX_BACKOFF_SECONDS)
+            delay = _backoff(attempt)
             self.console.print(
                 f"[yellow]Page {page}: {last_error} - retrying in {delay:.0f}s "
                 f"(attempt {attempt}/{_MAX_PAGE_ATTEMPTS})[/yellow]"
             )
             time.sleep(delay)
 
-        self.stop_reason = (
-            f"GitHub API error on page {page} after {_MAX_PAGE_ATTEMPTS} attempts: {last_error}"
-        )
-        self.console.print(
-            f"[red]API error on page {page}, giving up after "
-            f"{_MAX_PAGE_ATTEMPTS} attempts: {last_error}[/red]"
-        )
+        # Reached either by exhausting retry attempts or by exhausting rate-limit waits;
+        # last_error says which, so the run report names the real cause.
+        self.stop_reason = f"GitHub API error on page {page}, gave up: {last_error}"
+        self.console.print(f"[red]API error on page {page}, giving up: {last_error}[/red]")
         return None
 
     def stream_prs(
