@@ -15,27 +15,23 @@ from swegen.create import is_test_file
 from .farm_hand import PRCandidate, _slug
 from .state import StreamState
 
-# A single transient GitHub failure used to end the whole run: the page fetch gave up on
-# the first error. At this call volume a 5xx or a dropped connection is routine, so pages
-# are retried with backoff and only a persistent failure stops the stream.
+# At this call volume a 5xx or a dropped connection is routine, so pages are retried with
+# backoff and only a persistent failure stops the stream.
 _MAX_PAGE_ATTEMPTS = 5
 _BACKOFF_BASE_SECONDS = 2.0
 _MAX_BACKOFF_SECONDS = 60.0
 
-# A rate limit is not a failure - it is GitHub telling us exactly when to come back - so a
-# wait does not consume a retry attempt. GitHub's primary limit resets on the hour, so the
-# ceiling is generous enough to sit one out (the proactive check further down already
-# sleeps to the reset uncapped). The number of waits is bounded instead, so a bogus header
-# cannot park the farm forever.
+# A rate limit says when to come back, so waiting one out does not consume a retry
+# attempt. The ceiling covers GitHub's hourly primary reset; the number of waits is bounded
+# instead, so a malformed reset header cannot stall the run indefinitely.
 _MAX_RATE_LIMIT_WAIT_SECONDS = 3600.0
 _MAX_RATE_LIMIT_WAITS = 3
 
-# Worth another try: server-side wobble or throttling, both of which pass.
+# Transient server-side conditions, worth another attempt.
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
-# Only these can be a rate limit. Retry-After is NOT exclusive to rate limits (a 503 often
-# carries one), so the status has to gate the decision or a 5xx would take the rate-limit
-# path and a 401/404 would stop failing fast.
+# Only these statuses can be a rate limit. Retry-After is not exclusive to rate limits (a
+# 503 often carries one), so the status, not the header, decides.
 _RATE_LIMIT_STATUS = frozenset({403, 429})
 
 
@@ -117,10 +113,9 @@ class StreamingPRFetcher:
         self.min_files = min_files
         self.require_tests = require_tests
         self.api_delay = api_delay
-        # Why the stream stopped early, or None if it ran to genuine exhaustion. The loop
-        # SWALLOWS a page-fetch error and breaks, which is indistinguishable from "no more
-        # PRs" to the caller - so a GitHub 5xx would otherwise be reported as a clean
-        # finish. The farmer reads this to tell the two apart in its run report.
+        # Why the stream stopped early, or None if the PR history ran out. The loop ends
+        # the generator identically in both cases, so the farmer reads this to tell an API
+        # failure apart from genuine exhaustion.
         self.stop_reason: str | None = None
 
         # GitHub API setup
@@ -140,13 +135,8 @@ class StreamingPRFetcher:
 
         GitHub signals a primary rate limit as 403/429 with X-RateLimit-Remaining: 0, and a
         secondary one as 403/429 with Retry-After. Both clear on their own, so both are
-        worth waiting out rather than abandoning the run.
-
-        The STATUS is checked first, and Retry-After alone is never enough. That header is
-        not exclusive to rate limits - a 503 routinely carries one - and trusting it on its
-        own would route a 5xx down the rate-limit path (waits that spend no retry budget,
-        logged as "rate limited") and, worse, stop a 401/404 from failing on the first
-        response as it must.
+        waited out rather than abandoning the run. Anything else returns None and falls
+        through to the retryable/terminal split.
         """
         if resp.status_code not in _RATE_LIMIT_STATUS:
             return None
@@ -165,11 +155,9 @@ class StreamingPRFetcher:
                     wait = float(reset) - time.time()
                 except ValueError:
                     return None
-                # Never zero. At the reset boundary GitHub can still report Remaining: 0
-                # while the reset timestamp has just passed (or the clock is skewed), and a
-                # zero-length wait would spin: three instant "waits" would exhaust the wait
-                # budget in milliseconds and kill the stream just as the limit was clearing.
-                # The +1s buffer matches the proactive rate-limit check below.
+                # Floored at 1s: at the reset boundary GitHub can still report
+                # Remaining: 0 with the reset already past, and a zero-length wait would
+                # spin through the wait budget without giving the limit time to clear.
                 return min(max(wait, 0.0) + 1.0, _MAX_RATE_LIMIT_WAIT_SECONDS)
         return None
 
@@ -181,16 +169,12 @@ class StreamingPRFetcher:
         Returns the response, or None when the stream should stop - in which case
         stop_reason is set so the farmer can report a failure rather than an exhaust.
 
-        Retries a 5xx, a rate limit, and any network/timeout error: at this call volume
-        those are routine and self-clearing, and abandoning the run over one costs an
-        entire farm. Does NOT retry a 401/403-without-rate-limit/404 - a bad token or a
-        missing repo will not fix itself, so retrying only delays the real error.
+        Retries a 5xx, a rate limit, and any network/timeout error, all of which clear on
+        their own. Does not retry a 401, a 404, or a 403 without rate-limit headers: a bad
+        token or a missing repo will not fix itself, so it fails on the first response.
         """
         last_error = "unknown"
-        # An explicit counter, not `for attempt in range(...)`: a rate-limit wait must NOT
-        # advance it. With a for-loop, `continue` after a wait silently burns an attempt,
-        # so a primary limit whose reset is an hour out would exhaust the budget waiting and
-        # then kill the run - the opposite of the intent.
+        # An explicit counter, so a rate-limit wait can `continue` without advancing it.
         attempt = 0
         rate_limit_waits = 0
 
@@ -219,9 +203,8 @@ class StreamingPRFetcher:
 
             wait = self._rate_limit_wait(resp)
             if wait is not None:
-                # Throttled. GitHub told us when to come back, so this is not a failed
-                # attempt - do not touch `attempt`. Bound the number of waits instead, so a
-                # malformed reset header cannot park the farm indefinitely.
+                # Throttled, not failed: `attempt` is untouched, and the number of waits is
+                # bounded instead.
                 rate_limit_waits += 1
                 last_error = f"HTTP {resp.status_code} {resp.reason} (rate limited)"
                 if rate_limit_waits > _MAX_RATE_LIMIT_WAITS:
@@ -255,8 +238,7 @@ class StreamingPRFetcher:
             )
             time.sleep(delay)
 
-        # Reached either by exhausting retry attempts or by exhausting rate-limit waits;
-        # last_error says which, so the run report names the real cause.
+        # Retry attempts or rate-limit waits exhausted; last_error says which.
         self.stop_reason = f"GitHub API error on page {page}, gave up: {last_error}"
         self.console.print(f"[red]API error on page {page}, giving up: {last_error}[/red]")
         return None
@@ -327,9 +309,7 @@ class StreamingPRFetcher:
 
             resp = self._get_page_with_retry(url, params, page)
             if resp is None:
-                # Retries exhausted, or a failure that will never self-heal (401/404).
-                # _get_page_with_retry has set stop_reason, which is what lets the farmer
-                # report this as stream_failed rather than a clean exhaust.
+                # Retries exhausted, or a terminal failure. stop_reason is already set.
                 skipped_stats["api_error"] += 1
                 break
 

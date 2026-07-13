@@ -9,8 +9,7 @@ from pathlib import Path
 def _report_time(report: dict | None) -> str:
     """When a run report was last meaningful: its end, or its start if still in flight.
 
-    Used to pick between two reports on merge. Empty string for a missing report, so any
-    real report beats none.
+    Empty string for a missing report, so any real report sorts above none.
     """
     if not report:
         return ""
@@ -61,10 +60,8 @@ class StreamState:
     last_pr_number: int | None = None
     last_created_at: str | None = None
     last_updated: str | None = None
-    # Death certificate for the most recent run: why it stopped. Written on every exit
-    # path (completed / aborted / crashed / interrupted) and pushed with the state, so a
-    # reclaimed sandbox still leaves an explanation behind. Without it, a crash and a
-    # clean completion are indistinguishable - the state simply stops advancing.
+    # Report for the most recent run: why it stopped. Written on every exit path and
+    # pushed with the state, so a reclaimed sandbox still leaves an explanation behind.
     last_run: dict | None = None
     skip_list_prs: set[int] = None
     
@@ -332,12 +329,8 @@ class StreamState:
         self.processed_prs -= self.publish_failed_prs | self.claude_rate_limited_prs
 
         self.total_fetched = max(self.total_fetched, other.total_fetched)
-        # Keep the more recent run report rather than always the receiver's. After startup
-        # the receiver ALWAYS has one (at least "running"), so "receiver wins" would discard
-        # the remote report unconditionally - including a terminal outcome another writer
-        # just published, replacing a death certificate with a mid-run "running" marker.
-        # A report is timestamped by when it ended, or by when its run began if it is still
-        # in flight; the later of the two survives.
+        # The later report wins, so a terminal outcome is not replaced by an in-flight
+        # marker from a run that started earlier.
         if _report_time(other.last_run) > _report_time(self.last_run):
             self.last_run = other.last_run
         if other.last_created_at and (

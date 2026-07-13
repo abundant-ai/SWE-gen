@@ -46,8 +46,7 @@ _DETAIL_MAX_CHARS = 2000
 _MESSAGE_MAX_CHARS = 500
 _REASON_MAX_CHARS = 1000
 
-# The final save carries the run report. If it never lands, the branch keeps the "running"
-# marker and a crashed run is indistinguishable from an OOM kill - so retry it.
+# The startup and final saves carry the run report; retry a transient push failure.
 _FINAL_SAVE_ATTEMPTS = 3
 _FINAL_SAVE_BACKOFF_SECONDS = 3.0
 
@@ -185,9 +184,7 @@ class StreamFarmer:
         # them on every iteration.
         self.prs_seen = 0
 
-        # Run-report bookkeeping. current_pr is set only while a PR is in flight: on a
-        # crash, its absence says we died BETWEEN PRs, which points at the fetcher rather
-        # than at task generation.
+        # current_pr is set only while a PR is in flight, so a crash report can name it.
         self.run_started_at = _now_utc()
         self.current_pr: int | None = None
 
@@ -245,37 +242,26 @@ class StreamFarmer:
     def run(self) -> int:
         """Run the continuous farming process.
 
-        Every exit path records a run report (a "death certificate") into the state before
-        _finalize() pushes it, so the state branch always explains why the run stopped.
-        Without it a crash and a clean completion are indistinguishable - the state simply
-        stops advancing, which is useless when the sandbox that held the traceback is gone.
+        Every exit path records a run report into the state, which _finalize() pushes, so
+        the state branch always says why the run stopped.
 
         Returns:
-            Exit code: 0 only on a clean run that produced tasks. Aborting (publish/state
-            failure, Claude rate limit) or crashing is always 1.
+            Exit code: 0 only on a clean run that produced tasks; 1 on abort or crash.
         """
         self._print_header()
 
-        # Mark the run as in-flight and push it. This is what makes a SILENT death
-        # detectable: if the sandbox is OOM-killed or reclaimed, nothing overwrites this,
-        # so the state branch is left saying outcome="running" with a stale timestamp -
-        # which is exactly the signature of "killed without getting to report".
+        # An in-flight marker, pushed before any work. Nothing overwrites it if the process
+        # is killed outright, so a report left at outcome="running" means the run never got
+        # to report an exit.
         self._record_outcome("running", "Run in progress")
-        # Retried, like the final save: a transient blip here should not stop a run before
-        # it starts, and aborting only once the retries are spent keeps `state_saved=False`
-        # honest - otherwise the panel would claim the branch was never written while
-        # _finalize quietly recovered it on retry.
         if not self._save_state_with_retry():
-            # The state branch is unwritable (bad token, branch protection, GitHub down).
-            # Stop NOW rather than farming: the first PR would spend a full Claude Code
-            # session and only then hit the same failure in _process_pr and abort anyway.
-            # Failing here costs zero sessions. The report still reaches the local mirror,
-            # which GitStateStore writes before it pushes.
+            # The state branch is unwritable. Stop before farming: a resumed sandbox depends
+            # on the branch, and the first PR would spend a full Claude Code session only to
+            # hit the same failure in _process_pr. The report still reaches the local mirror.
             self._abort(
                 "Farm state could not be pushed to the state branch at startup.",
                 "Nothing has been farmed yet. Fix the token or GitHub connectivity and "
-                "re-run - stopping here avoids burning a Claude Code session on the first "
-                "PR just to fail at the same wall.",
+                "re-run.",
                 state_saved=False,
             )
             self._save_log()
@@ -288,14 +274,10 @@ class StreamFarmer:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
             self._record_outcome("interrupted", "Interrupted by user (SIGINT)")
         except Exception as e:
-            # Anything the per-PR handler did not already catch - most commonly the
-            # StreamingPRFetcher raising while fetching the next page (GitHub 5xx, network,
-            # rate limit). Previously this escaped run() as a raw traceback, so the state
-            # branch showed a healthy run that simply stopped, and the only explanation
-            # died with the sandbox.
+            # Whatever the per-PR handler did not catch, typically the fetcher raising
+            # between PRs.
             self._record_crash(e)
         finally:
-            # Pushes the state, run report included.
             self._finalize()
 
         if self.aborted:
@@ -303,25 +285,20 @@ class StreamFarmer:
         return 0 if self.state.successful > 0 else 1
 
     def _record_stream_end(self) -> None:
-        """Classify a stream that ended without raising. Three very different things.
+        """Classify a stream that ended without raising.
 
-        The generator returns identically whether it ran out of PRs, gave up on a GitHub
-        API error, or was cut short by a shutdown signal - so each has to be teased apart
-        explicitly, or a farm killed by a GitHub outage gets filed as a clean finish.
+        The generator returns identically whether the PR history ran out, the fetcher gave
+        up on an API error, or a shutdown signal cut the loop short, so each is teased apart
+        here.
         """
         if self.aborted:
-            # _abort() already wrote the report, with its own reason.
+            # _abort() already recorded the outcome.
             return
 
-        # stop_reason is checked BEFORE shutdown_requested on purpose. A signal can arrive
-        # while a page fetch is failing, and the API failure is the substantive cause: it is
-        # what a re-run has to overcome. Checking the signal first would drop stop_reason
-        # AND file the run as `interrupted`, which does not set aborted - so run() could
-        # return 0 on a stream failure, reporting a broken run as a healthy one.
+        # A stream failure outranks a signal: it is the condition a re-run has to overcome,
+        # and unlike `interrupted` it sets aborted, so the run exits non-zero.
         if self.fetcher.stop_reason:
-            # The fetcher gave up on a page fetch and broke out. Not exhaustion, and not a
-            # crash: the run stopped early and should be retried.
-            self.aborted = True  # exit 1: this run did not finish its work
+            self.aborted = True
             reason = self.fetcher.stop_reason
             if self.shutdown_requested:
                 reason = f"{reason} (a shutdown signal also arrived)"
@@ -340,19 +317,16 @@ class StreamFarmer:
             )
             return
 
+        # _handle_shutdown only sets a flag, so a signal never raises KeyboardInterrupt and
+        # has to be recognised here.
         if self.shutdown_requested:
-            # SIGINT/SIGTERM. _handle_shutdown only sets a flag - it never raises - so the
-            # KeyboardInterrupt branch in run() does NOT fire for a signal, and without
-            # this the report would be left saying "running": the silent-kill signature.
-            # SIGTERM is exactly what a sandbox stop sends, so this must not look like a
-            # crash.
             self._record_outcome("interrupted", "Shutdown requested (SIGINT/SIGTERM)")
             return
 
         self._record_outcome("completed", "PR stream exhausted")
 
     def _recent_results(self, limit: int = 5) -> list[dict]:
-        """The last few PR outcomes, for context on what the farm was doing when it died."""
+        """The last few PR outcomes, for context on what the run was doing when it stopped."""
         recent = []
         for r in self.results[-limit:]:
             entry = {"pr": r.pr_number, "status": r.status, "category": r.category}
@@ -364,7 +338,7 @@ class StreamFarmer:
         return recent
 
     def _environment_report(self) -> dict:
-        """Host / version / config context. All of it is needed to reproduce a crash."""
+        """Host, version and config context needed to reproduce a failure."""
 
         def _ver(pkg: str) -> str | None:
             try:
@@ -375,7 +349,7 @@ class StreamFarmer:
         pub = self.config.publish
         return {
             "host": platform.node(),
-            # Set by Daytona inside the sandbox; lets a report be tied back to a container.
+            # Set by Daytona inside the sandbox; ties a report back to its container.
             "sandbox_id": os.environ.get("DAYTONA_SANDBOX_ID"),
             "versions": {
                 "swegen": _ver("swegen"),
@@ -404,12 +378,11 @@ class StreamFarmer:
     ) -> None:
         """Write the run report into the state, to be pushed on the next save.
 
-        outcome: running | completed | aborted | crashed | interrupted
+        outcome: running | completed | aborted | crashed | interrupted | stream_failed
 
-        Deliberately verbose: this is committed to the state branch and is often the ONLY
-        surviving evidence once an ephemeral sandbox is gone. It stays bounded (a capped
-        traceback tail, the last few results) so the branch does not bloat, and it is only
-        written on run start and run exit - not per PR.
+        This is often the only surviving evidence once an ephemeral sandbox is gone, so it
+        is detailed - but bounded (capped free text, the last few results) and written only
+        on run start and run exit, not per PR.
         """
         now = _now_utc()
         report: dict = {
@@ -419,8 +392,8 @@ class StreamFarmer:
             "ended_at": now.isoformat() if outcome != "running" else None,
             "duration_seconds": round((now - self.run_started_at).total_seconds(), 1),
             "prs_seen_this_run": self.prs_seen,
-            # Set only while a PR is in flight. Its ABSENCE on a crash is itself a clue: we
-            # died between PRs, which points at the fetcher rather than task generation.
+            # Set only while a PR is in flight; null on a crash means the failure happened
+            # between PRs, i.e. in the fetcher rather than in task generation.
             "pr_in_flight": self.current_pr,
             "last_pr_number": self.state.last_pr_number,
             "last_created_at": self.state.last_created_at,
@@ -445,11 +418,10 @@ class StreamFarmer:
         self.state.last_run = report
 
     def _record_crash(self, exc: BaseException) -> None:
-        """Record an unhandled exception and show it, instead of dying with a bare trace."""
+        """Record an unhandled exception and show it, rather than exiting with a bare trace."""
         tb = traceback.format_exc()
-        # Keep the tail: the frames nearest the failure are the informative ones, and the
-        # report is committed to a git branch, so it must stay bounded. format_exc()
-        # includes chained causes ("during handling of...", "caused by"), which we want.
+        # The tail holds the frames nearest the failure, and any chained cause. Bounded
+        # because the report is committed to a git branch.
         tail = "\n".join(tb.strip().splitlines()[-_TRACEBACK_TAIL_LINES:])
 
         self.aborted = True
@@ -532,10 +504,8 @@ class StreamFarmer:
         # disk. Republish it instead of regenerating - force=True would delete it first.
         publish_only = pr.number in self.state.publish_failed_prs
 
-        # Held for the duration of this PR, and deliberately NOT cleared in a finally: if we
-        # crash here it must survive into the run report. Cleared only once the PR is fully
-        # handled (see the end of this method), so a crash with pr_in_flight=None means we
-        # died between PRs - which points at the fetcher rather than at task generation.
+        # Not cleared in a finally: a crash here must leave this set so the run report can
+        # name the PR. Cleared once the PR is fully handled, at the end of this method.
         self.current_pr = pr.number
 
         result = _run_reversal_for_pr(
@@ -587,15 +557,12 @@ class StreamFarmer:
         # Show result
         self._print_result(result)
 
-        # A publish failure or a failed state push ends the run. Checked together: both can
-        # fail in the same iteration, and reporting only the first would tell the operator
-        # farm state was preserved when it was not. current_pr stays set here on purpose:
-        # the abort report should name the PR we stopped on.
+        # A publish failure and a failed state push can occur in the same iteration, so
+        # both are reported. current_pr stays set: an abort report should name the PR.
         if self._check_publish_health(result, state_saved):
             return
 
-        # This PR is fully handled. Anything that crashes from here to the next PR is the
-        # fetcher's, and the report will say pr_in_flight=None.
+        # This PR is fully handled; a later crash is the fetcher's, and reports no PR.
         self.current_pr = None
 
         # Rate limit protection: only sleep after PRs that actually ran a CC session
@@ -842,11 +809,8 @@ class StreamFarmer:
         work actually done, and a resumed sandbox would redo it. Exiting 0 would tell a
         supervisor everything was fine.
         """
-        # This is the most consequential save of the run: it carries the run report. If it
-        # never lands, the state branch is left holding the "running" marker from startup -
-        # which is our silent-kill signature - so a run that actually crashed or completed
-        # would be indistinguishable from one that was OOM-killed. Worth retrying rather
-        # than accepting on a single transient failure.
+        # Carries the run report, so a transient push failure is retried rather than
+        # leaving the branch without an explanation for this run.
         if not self._save_state_with_retry():
             self.aborted = True
             self.console.print(
