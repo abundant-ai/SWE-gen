@@ -44,6 +44,7 @@ HARBOR_IMAGE_GLOB = "hb__*"
 _TRACEBACK_TAIL_LINES = 40
 _DETAIL_MAX_CHARS = 2000
 _MESSAGE_MAX_CHARS = 500
+_REASON_MAX_CHARS = 1000
 
 
 def docker_cleanup_cmds(build_cache_keep: str) -> list[str]:
@@ -259,9 +260,7 @@ class StreamFarmer:
 
         try:
             self._run_stream()
-            if not self.aborted and not self.shutdown_requested:
-                # The stream ended on its own: no more candidate PRs upstream.
-                self._record_outcome("completed", "PR stream exhausted")
+            self._record_stream_end()
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
             self._record_outcome("interrupted", "Interrupted by user (SIGINT)")
@@ -279,6 +278,47 @@ class StreamFarmer:
         if self.aborted:
             return 1
         return 0 if self.state.successful > 0 else 1
+
+    def _record_stream_end(self) -> None:
+        """Classify a stream that ended without raising. Three very different things.
+
+        The generator returns identically whether it ran out of PRs, gave up on a GitHub
+        API error, or was cut short by a shutdown signal - so each has to be teased apart
+        explicitly, or a farm killed by a GitHub outage gets filed as a clean finish.
+        """
+        if self.aborted:
+            # _abort() already wrote the report, with its own reason.
+            return
+
+        if self.shutdown_requested:
+            # SIGINT/SIGTERM. _handle_shutdown only sets a flag - it never raises - so the
+            # KeyboardInterrupt branch in run() does NOT fire for a signal, and without
+            # this the report would be left saying "running": the silent-kill signature.
+            # SIGTERM is exactly what a sandbox stop sends, so this must not look like a
+            # crash.
+            self._record_outcome("interrupted", "Shutdown requested (SIGINT/SIGTERM)")
+            return
+
+        if self.fetcher.stop_reason:
+            # The fetcher swallowed a page-fetch error and broke out. Not exhaustion, and
+            # not a crash: the run stopped early and should be retried.
+            self.aborted = True  # exit 1: this run did not finish its work
+            self._record_outcome("stream_failed", self.fetcher.stop_reason)
+            self.console.print(
+                Panel(
+                    Text(
+                        f"{self.fetcher.stop_reason}\n\n"
+                        f"The PR stream stopped early - this is NOT an exhausted history. "
+                        f"Re-run to continue from the cursor.",
+                        style="red",
+                    ),
+                    title="[red]Stopping: PR stream failed[/red]",
+                    border_style="red",
+                )
+            )
+            return
+
+        self._record_outcome("completed", "PR stream exhausted")
 
     def _recent_results(self, limit: int = 5) -> list[dict]:
         """The last few PR outcomes, for context on what the farm was doing when it died."""
@@ -307,7 +347,7 @@ class StreamFarmer:
             # Set by Daytona inside the sandbox; lets a report be tied back to a container.
             "sandbox_id": os.environ.get("DAYTONA_SANDBOX_ID"),
             "versions": {
-                "swegen": _ver("swe-gen"),
+                "swegen": _ver("swegen"),
                 "claude_agent_sdk": _ver("claude-agent-sdk"),
                 "harbor": _ver("harbor"),
                 "python": platform.python_version(),
@@ -343,7 +383,7 @@ class StreamFarmer:
         now = _now_utc()
         report: dict = {
             "outcome": outcome,
-            "reason": reason,
+            "reason": reason[:_REASON_MAX_CHARS],
             "started_at": self.run_started_at.isoformat(),
             "ended_at": now.isoformat() if outcome != "running" else None,
             "duration_seconds": round((now - self.run_started_at).total_seconds(), 1),
