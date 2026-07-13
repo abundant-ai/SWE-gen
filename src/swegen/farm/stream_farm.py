@@ -46,6 +46,11 @@ _DETAIL_MAX_CHARS = 2000
 _MESSAGE_MAX_CHARS = 500
 _REASON_MAX_CHARS = 1000
 
+# The final save carries the run report. If it never lands, the branch keeps the "running"
+# marker and a crashed run is indistinguishable from an OOM kill - so retry it.
+_FINAL_SAVE_ATTEMPTS = 3
+_FINAL_SAVE_BACKOFF_SECONDS = 3.0
+
 
 def docker_cleanup_cmds(build_cache_keep: str) -> list[str]:
     """Docker cleanup steps, in order.
@@ -304,24 +309,23 @@ class StreamFarmer:
             # _abort() already wrote the report, with its own reason.
             return
 
-        if self.shutdown_requested:
-            # SIGINT/SIGTERM. _handle_shutdown only sets a flag - it never raises - so the
-            # KeyboardInterrupt branch in run() does NOT fire for a signal, and without
-            # this the report would be left saying "running": the silent-kill signature.
-            # SIGTERM is exactly what a sandbox stop sends, so this must not look like a
-            # crash.
-            self._record_outcome("interrupted", "Shutdown requested (SIGINT/SIGTERM)")
-            return
-
+        # stop_reason is checked BEFORE shutdown_requested on purpose. A signal can arrive
+        # while a page fetch is failing, and the API failure is the substantive cause: it is
+        # what a re-run has to overcome. Checking the signal first would drop stop_reason
+        # AND file the run as `interrupted`, which does not set aborted - so run() could
+        # return 0 on a stream failure, reporting a broken run as a healthy one.
         if self.fetcher.stop_reason:
-            # The fetcher swallowed a page-fetch error and broke out. Not exhaustion, and
-            # not a crash: the run stopped early and should be retried.
+            # The fetcher gave up on a page fetch and broke out. Not exhaustion, and not a
+            # crash: the run stopped early and should be retried.
             self.aborted = True  # exit 1: this run did not finish its work
-            self._record_outcome("stream_failed", self.fetcher.stop_reason)
+            reason = self.fetcher.stop_reason
+            if self.shutdown_requested:
+                reason = f"{reason} (a shutdown signal also arrived)"
+            self._record_outcome("stream_failed", reason)
             self.console.print(
                 Panel(
                     Text(
-                        f"{self.fetcher.stop_reason}\n\n"
+                        f"{reason}\n\n"
                         f"The PR stream stopped early - this is NOT an exhausted history. "
                         f"Re-run to continue from the cursor.",
                         style="red",
@@ -330,6 +334,15 @@ class StreamFarmer:
                     border_style="red",
                 )
             )
+            return
+
+        if self.shutdown_requested:
+            # SIGINT/SIGTERM. _handle_shutdown only sets a flag - it never raises - so the
+            # KeyboardInterrupt branch in run() does NOT fire for a signal, and without
+            # this the report would be left saying "running": the silent-kill signature.
+            # SIGTERM is exactly what a sandbox stop sends, so this must not look like a
+            # crash.
+            self._record_outcome("interrupted", "Shutdown requested (SIGINT/SIGTERM)")
             return
 
         self._record_outcome("completed", "PR stream exhausted")
@@ -825,13 +838,36 @@ class StreamFarmer:
         work actually done, and a resumed sandbox would redo it. Exiting 0 would tell a
         supervisor everything was fine.
         """
-        if not self._save_state():
+        # This is the most consequential save of the run: it carries the run report. If it
+        # never lands, the state branch is left holding the "running" marker from startup -
+        # which is our silent-kill signature - so a run that actually crashed or completed
+        # would be indistinguishable from one that was OOM-killed. Worth retrying rather
+        # than accepting on a single transient failure.
+        if not self._save_state_with_retry():
             self.aborted = True
             self.console.print(
-                "[red]Final state push failed - the durable cursor is stale. "
-                "Recover the local state mirror before this sandbox is reclaimed.[/red]"
+                "[red]Final state push failed after "
+                f"{_FINAL_SAVE_ATTEMPTS} attempts - the durable cursor is stale and the "
+                "state branch still says 'running'. The full run report IS in the local "
+                f"mirror ({self.state_file}); recover it before this sandbox is "
+                "reclaimed.[/red]"
             )
         self._save_log()
+
+    def _save_state_with_retry(self) -> bool:
+        """Save the state, retrying a transient push failure with backoff."""
+        for attempt in range(1, _FINAL_SAVE_ATTEMPTS + 1):
+            if self._save_state():
+                return True
+            if attempt == _FINAL_SAVE_ATTEMPTS:
+                break
+            delay = _FINAL_SAVE_BACKOFF_SECONDS * attempt
+            self.console.print(
+                f"[yellow]State push failed; retrying in {delay:.0f}s "
+                f"(attempt {attempt}/{_FINAL_SAVE_ATTEMPTS})[/yellow]"
+            )
+            time.sleep(delay)
+        return False
 
         self.console.print("\n")
         self.console.print(Rule(Text("Final Summary", style="bold magenta")))
