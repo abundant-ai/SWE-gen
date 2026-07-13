@@ -256,7 +256,21 @@ class StreamFarmer:
         # so the state branch is left saying outcome="running" with a stale timestamp -
         # which is exactly the signature of "killed without getting to report".
         self._record_outcome("running", "Run in progress")
-        self._save_state()
+        if not self._save_state():
+            # The state branch is unwritable (bad token, branch protection, GitHub down).
+            # Stop NOW rather than farming: the first PR would spend a full Claude Code
+            # session and only then hit the same failure in _process_pr and abort anyway.
+            # Failing here costs zero sessions. The report still reaches the local mirror,
+            # which GitStateStore writes before it pushes.
+            self._abort(
+                "Farm state could not be pushed to the state branch at startup.",
+                "Nothing has been farmed yet. Fix the token or GitHub connectivity and "
+                "re-run - stopping here avoids burning a Claude Code session on the first "
+                "PR just to fail at the same wall.",
+                state_saved=False,
+            )
+            self._finalize()
+            return 1
 
         try:
             self._run_stream()
