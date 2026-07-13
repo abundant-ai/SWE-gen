@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import shutil
 import signal
 import subprocess
 import time
+import traceback
 from dataclasses import asdict
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from rich.console import Console
@@ -34,6 +39,16 @@ from .state import StreamState
 # runtimes) or any unrelated image on the host, both of which `docker system prune -af`
 # would happily delete.
 HARBOR_IMAGE_GLOB = "hb__*"
+
+# The run report is committed to the state branch, so every free-text field is capped.
+_TRACEBACK_TAIL_LINES = 40
+_DETAIL_MAX_CHARS = 2000
+_MESSAGE_MAX_CHARS = 500
+_REASON_MAX_CHARS = 1000
+
+# The startup and final saves carry the run report; retry a transient push failure.
+_FINAL_SAVE_ATTEMPTS = 3
+_FINAL_SAVE_BACKOFF_SECONDS = 3.0
 
 
 def docker_cleanup_cmds(build_cache_keep: str) -> list[str]:
@@ -168,6 +183,11 @@ class StreamFarmer:
         # driving the prune/progress cadence off a counter that never moves would fire
         # them on every iteration.
         self.prs_seen = 0
+
+        # current_pr is set only while a PR is in flight, so a crash report can name it.
+        self.run_started_at = _now_utc()
+        self.current_pr: int | None = None
+
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
@@ -222,23 +242,215 @@ class StreamFarmer:
     def run(self) -> int:
         """Run the continuous farming process.
 
+        Every exit path records a run report into the state, which _finalize() pushes, so
+        the state branch always says why the run stopped.
+
         Returns:
-            Exit code: 0 if any tasks succeeded, 1 otherwise. Aborting because publishing
-            broke is always a failure, even if earlier tasks published fine.
+            Exit code: 0 only on a clean run that produced tasks; 1 on abort or crash.
         """
         self._print_header()
 
-        # Start streaming and processing
+        # An in-flight marker, pushed before any work. Nothing overwrites it if the process
+        # is killed outright, so a report left at outcome="running" means the run never got
+        # to report an exit.
+        self._record_outcome("running", "Run in progress")
+        if not self._save_state_with_retry():
+            # The state branch is unwritable. Stop before farming: a resumed sandbox depends
+            # on the branch, and the first PR would spend a full Claude Code session only to
+            # hit the same failure in _process_pr. The report still reaches the local mirror.
+            self._abort(
+                "Farm state could not be pushed to the state branch at startup.",
+                "Nothing has been farmed yet. Fix the token or GitHub connectivity and "
+                "re-run.",
+                state_saved=False,
+            )
+            self._save_log()
+            return 1
+
         try:
             self._run_stream()
+            self._record_stream_end()
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
+            self._record_outcome("interrupted", "Interrupted by user (SIGINT)")
+        except Exception as e:
+            # Whatever the per-PR handler did not catch, typically the fetcher raising
+            # between PRs.
+            self._record_crash(e)
         finally:
             self._finalize()
 
         if self.aborted:
             return 1
         return 0 if self.state.successful > 0 else 1
+
+    def _record_stream_end(self) -> None:
+        """Classify a stream that ended without raising.
+
+        The generator returns identically whether the PR history ran out, the fetcher gave
+        up on an API error, or a shutdown signal cut the loop short, so each is teased apart
+        here.
+        """
+        if self.aborted:
+            # _abort() already recorded the outcome.
+            return
+
+        # A stream failure outranks a signal: it is the condition a re-run has to overcome,
+        # and unlike `interrupted` it sets aborted, so the run exits non-zero.
+        if self.fetcher.stop_reason:
+            self.aborted = True
+            reason = self.fetcher.stop_reason
+            if self.shutdown_requested:
+                reason = f"{reason} (a shutdown signal also arrived)"
+            self._record_outcome("stream_failed", reason)
+            self.console.print(
+                Panel(
+                    Text(
+                        f"{reason}\n\n"
+                        f"The PR stream stopped early - this is NOT an exhausted history. "
+                        f"Re-run to continue from the cursor.",
+                        style="red",
+                    ),
+                    title="[red]Stopping: PR stream failed[/red]",
+                    border_style="red",
+                )
+            )
+            return
+
+        # _handle_shutdown only sets a flag, so a signal never raises KeyboardInterrupt and
+        # has to be recognised here.
+        if self.shutdown_requested:
+            self._record_outcome("interrupted", "Shutdown requested (SIGINT/SIGTERM)")
+            return
+
+        self._record_outcome("completed", "PR stream exhausted")
+
+    def _recent_results(self, limit: int = 5) -> list[dict]:
+        """The last few PR outcomes, for context on what the run was doing when it stopped."""
+        recent = []
+        for r in self.results[-limit:]:
+            entry = {"pr": r.pr_number, "status": r.status, "category": r.category}
+            if r.message:
+                entry["message"] = r.message[:_MESSAGE_MAX_CHARS]
+            if r.pr_url:
+                entry["pr_url"] = r.pr_url
+            recent.append(entry)
+        return recent
+
+    def _environment_report(self) -> dict:
+        """Host, version and config context needed to reproduce a failure."""
+
+        def _ver(pkg: str) -> str | None:
+            try:
+                return _pkg_version(pkg)
+            except PackageNotFoundError:
+                return None
+
+        pub = self.config.publish
+        return {
+            "host": platform.node(),
+            # Set by Daytona inside the sandbox; ties a report back to its container.
+            "sandbox_id": os.environ.get("DAYTONA_SANDBOX_ID"),
+            "versions": {
+                "swegen": _ver("swegen"),
+                "claude_agent_sdk": _ver("claude-agent-sdk"),
+                "harbor": _ver("harbor"),
+                "python": platform.python_version(),
+            },
+            "config": {
+                "environment": str(self.config.environment),
+                "cc_timeout": self.config.cc_timeout,
+                "require_issue": self.config.require_issue,
+                "docker_prune_batch": self.config.docker_prune_batch,
+                "publish_repo": pub.repo if pub else None,
+                "cleanup_local": pub.cleanup_local if pub else None,
+                "dry_run": self.config.dry_run,
+            },
+        }
+
+    def _record_outcome(
+        self,
+        outcome: str,
+        reason: str,
+        detail: str | None = None,
+        error_type: str | None = None,
+        traceback_tail: str | None = None,
+    ) -> None:
+        """Write the run report into the state, to be pushed on the next save.
+
+        outcome: running | completed | aborted | crashed | interrupted | stream_failed
+
+        This is often the only surviving evidence once an ephemeral sandbox is gone, so it
+        is detailed - but bounded (capped free text, the last few results) and written only
+        on run start and run exit, not per PR.
+        """
+        now = _now_utc()
+        report: dict = {
+            "outcome": outcome,
+            "reason": reason[:_REASON_MAX_CHARS],
+            "started_at": self.run_started_at.isoformat(),
+            "ended_at": now.isoformat() if outcome != "running" else None,
+            "duration_seconds": round((now - self.run_started_at).total_seconds(), 1),
+            "prs_seen_this_run": self.prs_seen,
+            # Set only while a PR is in flight; null on a crash means the failure happened
+            # between PRs, i.e. in the fetcher rather than in task generation.
+            "pr_in_flight": self.current_pr,
+            "last_pr_number": self.state.last_pr_number,
+            "last_created_at": self.state.last_created_at,
+            "counters": {
+                "successful": self.state.successful,
+                "failed": self.state.failed,
+                "total_processed": self.state.total_processed,
+            },
+            "pending_retry": {
+                "publish_failed": sorted(self.state.publish_failed_prs),
+                "claude_rate_limited": sorted(self.state.claude_rate_limited_prs),
+            },
+            "recent_results": self._recent_results(),
+            "environment": self._environment_report(),
+        }
+        if detail:
+            report["detail"] = detail[:_DETAIL_MAX_CHARS]
+        if error_type:
+            report["error_type"] = error_type
+        if traceback_tail:
+            report["traceback"] = traceback_tail
+        self.state.last_run = report
+
+    def _record_crash(self, exc: BaseException) -> None:
+        """Record an unhandled exception and show it, rather than exiting with a bare trace."""
+        tb = traceback.format_exc()
+        # The tail holds the frames nearest the failure, and any chained cause. Bounded
+        # because the report is committed to a git branch.
+        tail = "\n".join(tb.strip().splitlines()[-_TRACEBACK_TAIL_LINES:])
+
+        self.aborted = True
+        self.shutdown_requested = True
+        self._record_outcome(
+            "crashed",
+            f"{type(exc).__name__}: {exc}",
+            error_type=type(exc).__name__,
+            traceback_tail=tail,
+        )
+
+        where = (
+            f"while processing PR #{self.current_pr}"
+            if self.current_pr is not None
+            else "between PRs (most likely fetching the next page of PRs)"
+        )
+        self.console.print(
+            Panel(
+                Text(
+                    f"{type(exc).__name__}: {exc}\n\n"
+                    f"Crashed {where}.\n"
+                    f"The run report is being pushed to the state branch, so this is "
+                    f"recoverable even if the sandbox is reclaimed.\n\n{tail}",
+                    style="red",
+                ),
+                title="[red]Farm crashed[/red]",
+                border_style="red",
+            )
+        )
 
     def _print_header(self) -> None:
         """Print the farming header with settings."""
@@ -292,7 +504,10 @@ class StreamFarmer:
         # disk. Republish it instead of regenerating - force=True would delete it first.
         publish_only = pr.number in self.state.publish_failed_prs
 
-        # Process this PR completely before moving to next
+        # Not cleared in a finally: a crash here must leave this set so the run report can
+        # name the PR. Cleared once the PR is fully handled, at the end of this method.
+        self.current_pr = pr.number
+
         result = _run_reversal_for_pr(
             pr, self.config, self.tasks_root, self.console, publish_only=publish_only
         )
@@ -342,11 +557,13 @@ class StreamFarmer:
         # Show result
         self._print_result(result)
 
-        # A publish failure or a failed state push ends the run. Checked together: both can
-        # fail in the same iteration, and reporting only the first would tell the operator
-        # farm state was preserved when it was not.
+        # A publish failure and a failed state push can occur in the same iteration, so
+        # both are reported. current_pr stays set: an abort report should name the PR.
         if self._check_publish_health(result, state_saved):
             return
+
+        # This PR is fully handled; a later crash is the fetcher's, and reports no PR.
+        self.current_pr = None
 
         # Rate limit protection: only sleep after PRs that actually ran a CC session
         if not self._should_delay_after(result):
@@ -383,6 +600,11 @@ class StreamFarmer:
         """
         self.aborted = True
         self.shutdown_requested = True
+
+        # Land the reason in the run report too, so the state branch explains the abort
+        # without anyone needing the console output (which dies with the sandbox).
+        self._record_outcome("aborted", reason, detail=detail or None)
+
         body = reason
         if detail:
             body += f"\n\n{detail}"
@@ -587,14 +809,18 @@ class StreamFarmer:
         work actually done, and a resumed sandbox would redo it. Exiting 0 would tell a
         supervisor everything was fine.
         """
-        if not self._save_state():
+        # Carries the run report, so a transient push failure is retried rather than
+        # leaving the branch without an explanation for this run.
+        if not self._save_state_with_retry():
             self.aborted = True
             self.console.print(
-                "[red]Final state push failed - the durable cursor is stale. "
-                "Recover the local state mirror before this sandbox is reclaimed.[/red]"
+                "[red]Final state push failed after "
+                f"{_FINAL_SAVE_ATTEMPTS} attempts - the durable cursor is stale and the "
+                "state branch did not receive this run's report (so it still shows whatever "
+                "it last held: the 'running' marker, or a previous run's outcome). The full "
+                f"report IS in the local mirror ({self.state_file}); recover it before this "
+                "sandbox is reclaimed.[/red]"
             )
-        self._save_log()
-
         self.console.print("\n")
         self.console.print(Rule(Text("Final Summary", style="bold magenta")))
 
@@ -651,6 +877,23 @@ class StreamFarmer:
         log_path = self._get_log_path()
         self.console.print(f"\n[dim]Detailed log: {log_path}[/dim]")
         self.console.print(f"[dim]State saved: {self.state_file}[/dim]")
+        self._save_log()
+
+    def _save_state_with_retry(self) -> bool:
+        """Save the state, retrying a transient push failure with backoff."""
+        for attempt in range(1, _FINAL_SAVE_ATTEMPTS + 1):
+            if self._save_state():
+                return True
+            if attempt == _FINAL_SAVE_ATTEMPTS:
+                break
+            delay = _FINAL_SAVE_BACKOFF_SECONDS * attempt
+            self.console.print(
+                f"[yellow]State push failed; retrying in {delay:.0f}s "
+                f"(attempt {attempt}/{_FINAL_SAVE_ATTEMPTS})[/yellow]"
+            )
+            time.sleep(delay)
+        return False
+
 
     def _save_log(self) -> None:
         """Save results log to file."""

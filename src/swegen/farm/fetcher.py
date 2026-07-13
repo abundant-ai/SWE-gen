@@ -94,6 +94,10 @@ class StreamingPRFetcher:
         self.min_files = min_files
         self.require_tests = require_tests
         self.api_delay = api_delay
+        # Why the stream stopped early, or None if the PR history ran out. The loop ends
+        # the generator identically in both cases, so the farmer reads this to tell an API
+        # failure apart from genuine exhaustion.
+        self.stop_reason: str | None = None
 
         # GitHub API setup
         self.api_base = "https://api.github.com"
@@ -177,6 +181,7 @@ class StreamingPRFetcher:
             except requests.exceptions.RequestException as exc:
                 self.console.print(f"[red]API error on page {page}: {exc}[/red]")
                 skipped_stats["api_error"] += 1
+                self.stop_reason = f"GitHub API error on page {page}: {exc}"
                 break
 
             prs = resp.json()
