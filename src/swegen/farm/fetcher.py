@@ -165,9 +165,12 @@ class StreamingPRFetcher:
                     wait = float(reset) - time.time()
                 except ValueError:
                     return None
-                if wait > 0:
-                    return min(wait + 1, _MAX_RATE_LIMIT_WAIT_SECONDS)
-                return 0.0
+                # Never zero. At the reset boundary GitHub can still report Remaining: 0
+                # while the reset timestamp has just passed (or the clock is skewed), and a
+                # zero-length wait would spin: three instant "waits" would exhaust the wait
+                # budget in milliseconds and kill the stream just as the limit was clearing.
+                # The +1s buffer matches the proactive rate-limit check below.
+                return min(max(wait, 0.0) + 1.0, _MAX_RATE_LIMIT_WAIT_SECONDS)
         return None
 
     def _get_page_with_retry(
