@@ -144,7 +144,9 @@ class StreamingPRFetcher:
         retry_after = resp.headers.get("Retry-After")
         if retry_after:
             try:
-                return min(float(retry_after), _MAX_RATE_LIMIT_WAIT_SECONDS)
+                # Floored, like the reset path below: a zero wait would spin through the
+                # wait budget without giving the limit time to clear.
+                return min(max(float(retry_after), 0.0) + 1.0, _MAX_RATE_LIMIT_WAIT_SECONDS)
             except ValueError:
                 pass
 
