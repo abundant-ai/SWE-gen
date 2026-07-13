@@ -261,7 +261,11 @@ class StreamFarmer:
         # so the state branch is left saying outcome="running" with a stale timestamp -
         # which is exactly the signature of "killed without getting to report".
         self._record_outcome("running", "Run in progress")
-        if not self._save_state():
+        # Retried, like the final save: a transient blip here should not stop a run before
+        # it starts, and aborting only once the retries are spent keeps `state_saved=False`
+        # honest - otherwise the panel would claim the branch was never written while
+        # _finalize quietly recovered it on retry.
+        if not self._save_state_with_retry():
             # The state branch is unwritable (bad token, branch protection, GitHub down).
             # Stop NOW rather than farming: the first PR would spend a full Claude Code
             # session and only then hit the same failure in _process_pr and abort anyway.
@@ -274,7 +278,7 @@ class StreamFarmer:
                 "PR just to fail at the same wall.",
                 state_saved=False,
             )
-            self._finalize()
+            self._save_log()
             return 1
 
         try:
@@ -848,27 +852,11 @@ class StreamFarmer:
             self.console.print(
                 "[red]Final state push failed after "
                 f"{_FINAL_SAVE_ATTEMPTS} attempts - the durable cursor is stale and the "
-                "state branch still says 'running'. The full run report IS in the local "
-                f"mirror ({self.state_file}); recover it before this sandbox is "
-                "reclaimed.[/red]"
+                "state branch did not receive this run's report (so it still shows whatever "
+                "it last held: the 'running' marker, or a previous run's outcome). The full "
+                f"report IS in the local mirror ({self.state_file}); recover it before this "
+                "sandbox is reclaimed.[/red]"
             )
-        self._save_log()
-
-    def _save_state_with_retry(self) -> bool:
-        """Save the state, retrying a transient push failure with backoff."""
-        for attempt in range(1, _FINAL_SAVE_ATTEMPTS + 1):
-            if self._save_state():
-                return True
-            if attempt == _FINAL_SAVE_ATTEMPTS:
-                break
-            delay = _FINAL_SAVE_BACKOFF_SECONDS * attempt
-            self.console.print(
-                f"[yellow]State push failed; retrying in {delay:.0f}s "
-                f"(attempt {attempt}/{_FINAL_SAVE_ATTEMPTS})[/yellow]"
-            )
-            time.sleep(delay)
-        return False
-
         self.console.print("\n")
         self.console.print(Rule(Text("Final Summary", style="bold magenta")))
 
@@ -925,6 +913,23 @@ class StreamFarmer:
         log_path = self._get_log_path()
         self.console.print(f"\n[dim]Detailed log: {log_path}[/dim]")
         self.console.print(f"[dim]State saved: {self.state_file}[/dim]")
+        self._save_log()
+
+    def _save_state_with_retry(self) -> bool:
+        """Save the state, retrying a transient push failure with backoff."""
+        for attempt in range(1, _FINAL_SAVE_ATTEMPTS + 1):
+            if self._save_state():
+                return True
+            if attempt == _FINAL_SAVE_ATTEMPTS:
+                break
+            delay = _FINAL_SAVE_BACKOFF_SECONDS * attempt
+            self.console.print(
+                f"[yellow]State push failed; retrying in {delay:.0f}s "
+                f"(attempt {attempt}/{_FINAL_SAVE_ATTEMPTS})[/yellow]"
+            )
+            time.sleep(delay)
+        return False
+
 
     def _save_log(self) -> None:
         """Save results log to file."""

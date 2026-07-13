@@ -6,6 +6,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
+def _report_time(report: dict | None) -> str:
+    """When a run report was last meaningful: its end, or its start if still in flight.
+
+    Used to pick between two reports on merge. Empty string for a missing report, so any
+    real report beats none.
+    """
+    if not report:
+        return ""
+    return report.get("ended_at") or report.get("started_at") or ""
+
+
 @dataclass
 class StreamState:
     """State for resumable streaming PR processing.
@@ -321,8 +332,13 @@ class StreamState:
         self.processed_prs -= self.publish_failed_prs | self.claude_rate_limited_prs
 
         self.total_fetched = max(self.total_fetched, other.total_fetched)
-        # Receiver is the fresher state, so its run report wins; fall back to the other's.
-        if self.last_run is None:
+        # Keep the more recent run report rather than always the receiver's. After startup
+        # the receiver ALWAYS has one (at least "running"), so "receiver wins" would discard
+        # the remote report unconditionally - including a terminal outcome another writer
+        # just published, replacing a death certificate with a mid-run "running" marker.
+        # A report is timestamped by when it ended, or by when its run began if it is still
+        # in flight; the later of the two survives.
+        if _report_time(other.last_run) > _report_time(self.last_run):
             self.last_run = other.last_run
         if other.last_created_at and (
             not self.last_created_at or other.last_created_at > self.last_created_at
