@@ -50,6 +50,11 @@ class StreamState:
     last_pr_number: int | None = None
     last_created_at: str | None = None
     last_updated: str | None = None
+    # Death certificate for the most recent run: why it stopped. Written on every exit
+    # path (completed / aborted / crashed / interrupted) and pushed with the state, so a
+    # reclaimed sandbox still leaves an explanation behind. Without it, a crash and a
+    # clean completion are indistinguishable - the state simply stops advancing.
+    last_run: dict | None = None
     skip_list_prs: set[int] = None
     
     # Detailed categorization
@@ -316,6 +321,9 @@ class StreamState:
         self.processed_prs -= self.publish_failed_prs | self.claude_rate_limited_prs
 
         self.total_fetched = max(self.total_fetched, other.total_fetched)
+        # Receiver is the fresher state, so its run report wins; fall back to the other's.
+        if self.last_run is None:
+            self.last_run = other.last_run
         if other.last_created_at and (
             not self.last_created_at or other.last_created_at > self.last_created_at
         ):
@@ -337,6 +345,7 @@ class StreamState:
             "last_pr_number": self.last_pr_number,
             "last_created_at": self.last_created_at,
             "last_updated": self.last_updated,
+            "last_run": self.last_run,
             # Detailed breakdown
             "successful_prs": {str(k): v for k, v in self.successful_prs.items()},
             "task_pr_urls": {str(k): v for k, v in self.task_pr_urls.items()},
@@ -378,6 +387,7 @@ class StreamState:
             last_pr_number=data.get("last_pr_number"),
             last_created_at=data.get("last_created_at"),
             last_updated=data.get("last_updated"),
+            last_run=data.get("last_run"),
             # Detailed breakdown
             successful_prs={int(k): v for k, v in data.get("successful_prs", {}).items()},
             task_pr_urls={int(k): v for k, v in data.get("task_pr_urls", {}).items()},

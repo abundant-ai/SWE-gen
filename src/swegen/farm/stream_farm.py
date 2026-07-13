@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import os
+import platform
 import shutil
 import signal
 import subprocess
 import time
+import traceback
 from dataclasses import asdict
 from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 
 from rich.console import Console
@@ -34,6 +39,11 @@ from .state import StreamState
 # runtimes) or any unrelated image on the host, both of which `docker system prune -af`
 # would happily delete.
 HARBOR_IMAGE_GLOB = "hb__*"
+
+# The run report is committed to the state branch, so every free-text field is capped.
+_TRACEBACK_TAIL_LINES = 40
+_DETAIL_MAX_CHARS = 2000
+_MESSAGE_MAX_CHARS = 500
 
 
 def docker_cleanup_cmds(build_cache_keep: str) -> list[str]:
@@ -168,6 +178,13 @@ class StreamFarmer:
         # driving the prune/progress cadence off a counter that never moves would fire
         # them on every iteration.
         self.prs_seen = 0
+
+        # Run-report bookkeeping. current_pr is set only while a PR is in flight: on a
+        # crash, its absence says we died BETWEEN PRs, which points at the fetcher rather
+        # than at task generation.
+        self.run_started_at = _now_utc()
+        self.current_pr: int | None = None
+
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
@@ -222,23 +239,175 @@ class StreamFarmer:
     def run(self) -> int:
         """Run the continuous farming process.
 
+        Every exit path records a run report (a "death certificate") into the state before
+        _finalize() pushes it, so the state branch always explains why the run stopped.
+        Without it a crash and a clean completion are indistinguishable - the state simply
+        stops advancing, which is useless when the sandbox that held the traceback is gone.
+
         Returns:
-            Exit code: 0 if any tasks succeeded, 1 otherwise. Aborting because publishing
-            broke is always a failure, even if earlier tasks published fine.
+            Exit code: 0 only on a clean run that produced tasks. Aborting (publish/state
+            failure, Claude rate limit) or crashing is always 1.
         """
         self._print_header()
 
-        # Start streaming and processing
+        # Mark the run as in-flight and push it. This is what makes a SILENT death
+        # detectable: if the sandbox is OOM-killed or reclaimed, nothing overwrites this,
+        # so the state branch is left saying outcome="running" with a stale timestamp -
+        # which is exactly the signature of "killed without getting to report".
+        self._record_outcome("running", "Run in progress")
+        self._save_state()
+
         try:
             self._run_stream()
+            if not self.aborted and not self.shutdown_requested:
+                # The stream ended on its own: no more candidate PRs upstream.
+                self._record_outcome("completed", "PR stream exhausted")
         except KeyboardInterrupt:
             self.console.print("\n[yellow]Interrupted by user[/yellow]")
+            self._record_outcome("interrupted", "Interrupted by user (SIGINT)")
+        except Exception as e:
+            # Anything the per-PR handler did not already catch - most commonly the
+            # StreamingPRFetcher raising while fetching the next page (GitHub 5xx, network,
+            # rate limit). Previously this escaped run() as a raw traceback, so the state
+            # branch showed a healthy run that simply stopped, and the only explanation
+            # died with the sandbox.
+            self._record_crash(e)
         finally:
+            # Pushes the state, run report included.
             self._finalize()
 
         if self.aborted:
             return 1
         return 0 if self.state.successful > 0 else 1
+
+    def _recent_results(self, limit: int = 5) -> list[dict]:
+        """The last few PR outcomes, for context on what the farm was doing when it died."""
+        recent = []
+        for r in self.results[-limit:]:
+            entry = {"pr": r.pr_number, "status": r.status, "category": r.category}
+            if r.message:
+                entry["message"] = r.message[:_MESSAGE_MAX_CHARS]
+            if r.pr_url:
+                entry["pr_url"] = r.pr_url
+            recent.append(entry)
+        return recent
+
+    def _environment_report(self) -> dict:
+        """Host / version / config context. All of it is needed to reproduce a crash."""
+
+        def _ver(pkg: str) -> str | None:
+            try:
+                return _pkg_version(pkg)
+            except PackageNotFoundError:
+                return None
+
+        pub = self.config.publish
+        return {
+            "host": platform.node(),
+            # Set by Daytona inside the sandbox; lets a report be tied back to a container.
+            "sandbox_id": os.environ.get("DAYTONA_SANDBOX_ID"),
+            "versions": {
+                "swegen": _ver("swe-gen"),
+                "claude_agent_sdk": _ver("claude-agent-sdk"),
+                "harbor": _ver("harbor"),
+                "python": platform.python_version(),
+            },
+            "config": {
+                "environment": str(self.config.environment),
+                "cc_timeout": self.config.cc_timeout,
+                "require_issue": self.config.require_issue,
+                "docker_prune_batch": self.config.docker_prune_batch,
+                "publish_repo": pub.repo if pub else None,
+                "cleanup_local": pub.cleanup_local if pub else None,
+                "dry_run": self.config.dry_run,
+            },
+        }
+
+    def _record_outcome(
+        self,
+        outcome: str,
+        reason: str,
+        detail: str | None = None,
+        error_type: str | None = None,
+        traceback_tail: str | None = None,
+    ) -> None:
+        """Write the run report into the state, to be pushed on the next save.
+
+        outcome: running | completed | aborted | crashed | interrupted
+
+        Deliberately verbose: this is committed to the state branch and is often the ONLY
+        surviving evidence once an ephemeral sandbox is gone. It stays bounded (a capped
+        traceback tail, the last few results) so the branch does not bloat, and it is only
+        written on run start and run exit - not per PR.
+        """
+        now = _now_utc()
+        report: dict = {
+            "outcome": outcome,
+            "reason": reason,
+            "started_at": self.run_started_at.isoformat(),
+            "ended_at": now.isoformat() if outcome != "running" else None,
+            "duration_seconds": round((now - self.run_started_at).total_seconds(), 1),
+            "prs_seen_this_run": self.prs_seen,
+            # Set only while a PR is in flight. Its ABSENCE on a crash is itself a clue: we
+            # died between PRs, which points at the fetcher rather than task generation.
+            "pr_in_flight": self.current_pr,
+            "last_pr_number": self.state.last_pr_number,
+            "last_created_at": self.state.last_created_at,
+            "counters": {
+                "successful": self.state.successful,
+                "failed": self.state.failed,
+                "total_processed": self.state.total_processed,
+            },
+            "pending_retry": {
+                "publish_failed": sorted(self.state.publish_failed_prs),
+                "claude_rate_limited": sorted(self.state.claude_rate_limited_prs),
+            },
+            "recent_results": self._recent_results(),
+            "environment": self._environment_report(),
+        }
+        if detail:
+            report["detail"] = detail[:_DETAIL_MAX_CHARS]
+        if error_type:
+            report["error_type"] = error_type
+        if traceback_tail:
+            report["traceback"] = traceback_tail
+        self.state.last_run = report
+
+    def _record_crash(self, exc: BaseException) -> None:
+        """Record an unhandled exception and show it, instead of dying with a bare trace."""
+        tb = traceback.format_exc()
+        # Keep the tail: the frames nearest the failure are the informative ones, and the
+        # report is committed to a git branch, so it must stay bounded. format_exc()
+        # includes chained causes ("during handling of...", "caused by"), which we want.
+        tail = "\n".join(tb.strip().splitlines()[-_TRACEBACK_TAIL_LINES:])
+
+        self.aborted = True
+        self.shutdown_requested = True
+        self._record_outcome(
+            "crashed",
+            f"{type(exc).__name__}: {exc}",
+            error_type=type(exc).__name__,
+            traceback_tail=tail,
+        )
+
+        where = (
+            f"while processing PR #{self.current_pr}"
+            if self.current_pr is not None
+            else "between PRs (most likely fetching the next page of PRs)"
+        )
+        self.console.print(
+            Panel(
+                Text(
+                    f"{type(exc).__name__}: {exc}\n\n"
+                    f"Crashed {where}.\n"
+                    f"The run report is being pushed to the state branch, so this is "
+                    f"recoverable even if the sandbox is reclaimed.\n\n{tail}",
+                    style="red",
+                ),
+                title="[red]Farm crashed[/red]",
+                border_style="red",
+            )
+        )
 
     def _print_header(self) -> None:
         """Print the farming header with settings."""
@@ -292,7 +461,12 @@ class StreamFarmer:
         # disk. Republish it instead of regenerating - force=True would delete it first.
         publish_only = pr.number in self.state.publish_failed_prs
 
-        # Process this PR completely before moving to next
+        # Held for the duration of this PR, and deliberately NOT cleared in a finally: if we
+        # crash here it must survive into the run report. Cleared only once the PR is fully
+        # handled (see the end of this method), so a crash with pr_in_flight=None means we
+        # died between PRs - which points at the fetcher rather than at task generation.
+        self.current_pr = pr.number
+
         result = _run_reversal_for_pr(
             pr, self.config, self.tasks_root, self.console, publish_only=publish_only
         )
@@ -344,9 +518,14 @@ class StreamFarmer:
 
         # A publish failure or a failed state push ends the run. Checked together: both can
         # fail in the same iteration, and reporting only the first would tell the operator
-        # farm state was preserved when it was not.
+        # farm state was preserved when it was not. current_pr stays set here on purpose:
+        # the abort report should name the PR we stopped on.
         if self._check_publish_health(result, state_saved):
             return
+
+        # This PR is fully handled. Anything that crashes from here to the next PR is the
+        # fetcher's, and the report will say pr_in_flight=None.
+        self.current_pr = None
 
         # Rate limit protection: only sleep after PRs that actually ran a CC session
         if not self._should_delay_after(result):
@@ -383,6 +562,11 @@ class StreamFarmer:
         """
         self.aborted = True
         self.shutdown_requested = True
+
+        # Land the reason in the run report too, so the state branch explains the abort
+        # without anyone needing the console output (which dies with the sandbox).
+        self._record_outcome("aborted", reason, detail=detail or None)
+
         body = reason
         if detail:
             body += f"\n\n{detail}"
