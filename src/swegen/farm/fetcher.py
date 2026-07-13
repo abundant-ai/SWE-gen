@@ -33,6 +33,11 @@ _MAX_RATE_LIMIT_WAITS = 3
 # Worth another try: server-side wobble or throttling, both of which pass.
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
+# Only these can be a rate limit. Retry-After is NOT exclusive to rate limits (a 503 often
+# carries one), so the status has to gate the decision or a 5xx would take the rate-limit
+# path and a 401/404 would stop failing fast.
+_RATE_LIMIT_STATUS = frozenset({403, 429})
+
 
 def load_skip_list(skip_list_file: Path, repo: str) -> set[int]:
     """Load PR numbers from a skip list file for the given repository.
@@ -134,9 +139,18 @@ class StreamingPRFetcher:
         """Seconds to wait if `resp` is a rate-limit rejection, else None.
 
         GitHub signals a primary rate limit as 403/429 with X-RateLimit-Remaining: 0, and a
-        secondary one with Retry-After. Both clear on their own, so both are worth waiting
-        out rather than abandoning the run.
+        secondary one as 403/429 with Retry-After. Both clear on their own, so both are
+        worth waiting out rather than abandoning the run.
+
+        The STATUS is checked first, and Retry-After alone is never enough. That header is
+        not exclusive to rate limits - a 503 routinely carries one - and trusting it on its
+        own would route a 5xx down the rate-limit path (waits that spend no retry budget,
+        logged as "rate limited") and, worse, stop a 401/404 from failing on the first
+        response as it must.
         """
+        if resp.status_code not in _RATE_LIMIT_STATUS:
+            return None
+
         retry_after = resp.headers.get("Retry-After")
         if retry_after:
             try:
@@ -144,7 +158,7 @@ class StreamingPRFetcher:
             except ValueError:
                 pass
 
-        if resp.status_code in (403, 429) and resp.headers.get("X-RateLimit-Remaining") == "0":
+        if resp.headers.get("X-RateLimit-Remaining") == "0":
             reset = resp.headers.get("X-RateLimit-Reset")
             if reset:
                 try:
