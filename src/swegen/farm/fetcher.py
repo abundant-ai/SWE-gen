@@ -94,10 +94,9 @@ class StreamingPRFetcher:
         self.min_files = min_files
         self.require_tests = require_tests
         self.api_delay = api_delay
-        # Why the stream stopped early, or None if it ran to genuine exhaustion. The loop
-        # SWALLOWS a page-fetch error and breaks, which is indistinguishable from "no more
-        # PRs" to the caller - so a GitHub 5xx would otherwise be reported as a clean
-        # finish. The farmer reads this to tell the two apart in its run report.
+        # Why the stream stopped early, or None if the PR history ran out. The loop ends
+        # the generator identically in both cases, so the farmer reads this to tell an API
+        # failure apart from genuine exhaustion.
         self.stop_reason: str | None = None
 
         # GitHub API setup
@@ -182,9 +181,6 @@ class StreamingPRFetcher:
             except requests.exceptions.RequestException as exc:
                 self.console.print(f"[red]API error on page {page}: {exc}[/red]")
                 skipped_stats["api_error"] += 1
-                # Record WHY we are giving up. Breaking here ends the generator exactly as
-                # exhaustion would, so without this the farmer cannot tell a GitHub outage
-                # from "no PRs left" and would file the run as completed.
                 self.stop_reason = f"GitHub API error on page {page}: {exc}"
                 break
 
