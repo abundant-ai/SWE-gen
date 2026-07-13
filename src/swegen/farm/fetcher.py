@@ -15,6 +15,25 @@ from swegen.create import is_test_file
 from .farm_hand import PRCandidate, _slug
 from .state import StreamState
 
+# At this call volume a 5xx or a dropped connection is routine, so pages are retried with
+# backoff and only a persistent failure stops the stream.
+_MAX_PAGE_ATTEMPTS = 5
+_BACKOFF_BASE_SECONDS = 2.0
+_MAX_BACKOFF_SECONDS = 60.0
+
+# A rate limit says when to come back, so waiting one out does not consume a retry
+# attempt. The ceiling covers GitHub's hourly primary reset; the number of waits is bounded
+# instead, so a malformed reset header cannot stall the run indefinitely.
+_MAX_RATE_LIMIT_WAIT_SECONDS = 3600.0
+_MAX_RATE_LIMIT_WAITS = 3
+
+# Transient server-side conditions, worth another attempt.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+# Only these statuses can be a rate limit. Retry-After is not exclusive to rate limits (a
+# 503 often carries one), so the status, not the header, decides.
+_RATE_LIMIT_STATUS = frozenset({403, 429})
+
 
 def load_skip_list(skip_list_file: Path, repo: str) -> set[int]:
     """Load PR numbers from a skip list file for the given repository.
@@ -111,6 +130,121 @@ class StreamingPRFetcher:
         if self.github_token:
             self.headers["Authorization"] = f"token {self.github_token}"
 
+    def _rate_limit_wait(self, resp: requests.Response) -> float | None:
+        """Seconds to wait if `resp` is a rate-limit rejection, else None.
+
+        GitHub signals a primary rate limit as 403/429 with X-RateLimit-Remaining: 0, and a
+        secondary one as 403/429 with Retry-After. Both clear on their own, so both are
+        waited out rather than abandoning the run. Anything else returns None and falls
+        through to the retryable/terminal split.
+        """
+        if resp.status_code not in _RATE_LIMIT_STATUS:
+            return None
+
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after:
+            try:
+                # Floored, like the reset path below: a zero wait would spin through the
+                # wait budget without giving the limit time to clear.
+                return min(max(float(retry_after), 0.0) + 1.0, _MAX_RATE_LIMIT_WAIT_SECONDS)
+            except ValueError:
+                pass
+
+        if resp.headers.get("X-RateLimit-Remaining") == "0":
+            reset = resp.headers.get("X-RateLimit-Reset")
+            if reset:
+                try:
+                    wait = float(reset) - time.time()
+                except ValueError:
+                    return None
+                # Floored at 1s: at the reset boundary GitHub can still report
+                # Remaining: 0 with the reset already past, and a zero-length wait would
+                # spin through the wait budget without giving the limit time to clear.
+                return min(max(wait, 0.0) + 1.0, _MAX_RATE_LIMIT_WAIT_SECONDS)
+        return None
+
+    def _get_page_with_retry(
+        self, url: str, params: dict[str, Any], page: int
+    ) -> requests.Response | None:
+        """Fetch one page of PRs, retrying transient failures.
+
+        Returns the response, or None when the stream should stop - in which case
+        stop_reason is set so the farmer can report a failure rather than an exhaust.
+
+        Retries a 5xx, a rate limit, and any network/timeout error, all of which clear on
+        their own. Does not retry a 401, a 404, or a 403 without rate-limit headers: a bad
+        token or a missing repo will not fix itself, so it fails on the first response.
+        """
+        last_error = "unknown"
+        # An explicit counter, so a rate-limit wait can `continue` without advancing it.
+        attempt = 0
+        rate_limit_waits = 0
+
+        def _backoff(n: int) -> float:
+            return min(_BACKOFF_BASE_SECONDS * 2 ** (n - 1), _MAX_BACKOFF_SECONDS)
+
+        while attempt < _MAX_PAGE_ATTEMPTS:
+            try:
+                resp = requests.get(url, headers=self.headers, params=params, timeout=30)
+            except requests.exceptions.RequestException as exc:
+                # Connection reset, DNS, timeout: always transient.
+                attempt += 1
+                last_error = f"{type(exc).__name__}: {exc}"
+                if attempt >= _MAX_PAGE_ATTEMPTS:
+                    break
+                delay = _backoff(attempt)
+                self.console.print(
+                    f"[yellow]Page {page}: {last_error} - retrying in {delay:.0f}s "
+                    f"(attempt {attempt}/{_MAX_PAGE_ATTEMPTS})[/yellow]"
+                )
+                time.sleep(delay)
+                continue
+
+            if resp.status_code < 400:
+                return resp
+
+            wait = self._rate_limit_wait(resp)
+            if wait is not None:
+                # Throttled, not failed: `attempt` is untouched, and the number of waits is
+                # bounded instead.
+                rate_limit_waits += 1
+                last_error = f"HTTP {resp.status_code} {resp.reason} (rate limited)"
+                if rate_limit_waits > _MAX_RATE_LIMIT_WAITS:
+                    last_error = (
+                        f"still rate limited after {_MAX_RATE_LIMIT_WAITS} waits "
+                        f"({resp.status_code} {resp.reason})"
+                    )
+                    break
+                self.console.print(
+                    f"[yellow]Page {page}: rate limited ({resp.status_code}), waiting "
+                    f"{wait:.0f}s (wait {rate_limit_waits}/{_MAX_RATE_LIMIT_WAITS}, "
+                    f"does not count as a retry)...[/yellow]"
+                )
+                time.sleep(wait)
+                continue
+
+            attempt += 1
+            last_error = f"HTTP {resp.status_code} {resp.reason}"
+            if resp.status_code not in _RETRYABLE_STATUS:
+                # 401 (bad token), 404 (no such repo), 403 (no access): terminal.
+                self.stop_reason = f"GitHub API error on page {page}: {last_error}"
+                self.console.print(f"[red]API error on page {page}: {last_error}[/red]")
+                return None
+
+            if attempt >= _MAX_PAGE_ATTEMPTS:
+                break
+            delay = _backoff(attempt)
+            self.console.print(
+                f"[yellow]Page {page}: {last_error} - retrying in {delay:.0f}s "
+                f"(attempt {attempt}/{_MAX_PAGE_ATTEMPTS})[/yellow]"
+            )
+            time.sleep(delay)
+
+        # Retry attempts or rate-limit waits exhausted; last_error says which.
+        self.stop_reason = f"GitHub API error on page {page}, gave up: {last_error}"
+        self.console.print(f"[red]API error on page {page}, giving up: {last_error}[/red]")
+        return None
+
     def stream_prs(
         self,
         resume_from_time: str | None = None,
@@ -175,13 +309,10 @@ class StreamingPRFetcher:
             url = f"{self.api_base}/repos/{self.repo}/pulls"
             params: dict[str, Any] = {**params_base, "page": page}
 
-            try:
-                resp = requests.get(url, headers=self.headers, params=params, timeout=30)
-                resp.raise_for_status()
-            except requests.exceptions.RequestException as exc:
-                self.console.print(f"[red]API error on page {page}: {exc}[/red]")
+            resp = self._get_page_with_retry(url, params, page)
+            if resp is None:
+                # Retries exhausted, or a terminal failure. stop_reason is already set.
                 skipped_stats["api_error"] += 1
-                self.stop_reason = f"GitHub API error on page {page}: {exc}"
                 break
 
             prs = resp.json()
